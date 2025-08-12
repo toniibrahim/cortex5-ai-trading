@@ -1,0 +1,83 @@
+# ===============================================
+# CORTEX5 AI TRADING SYSTEM - .gitignore
+# ===============================================
+# This file prevents sensitive trading data from being uploaded to GitHub
+
+# ============ SENSITIVE TRADING FILES ============
+# Never commit actual trading models or account data
+*.dat                    # AI model files (contain proprietary training)
+*.bin                    # Binary model files
+*.model                  # Model files
+*.weights                # Neural network weights
+*.h5                     # Keras model files
+*.pkl                    # Pickle files with trading data
+*.sqlite                 # Trading databases
+*.db                     # Database files
+
+# ============ METATRADER FILES ============
+# MetaTrader generated files and logs
+*.log                    # MT5 log files
+*.exp                    # Compiled expert advisors
+*.ex5                    # Compiled MQL5 files
+Logs/                    # MT5 logs directory
+MQL5/Logs/              # MQL5 specific logs
+Tester/                 # Strategy tester files
+Terminal/               # Terminal data
+History/                # Historical data files
+bases/                  # MT5 bases directory
+
+# ============ TRADING DATA ============
+# Historical data and backtest results
+*.csv                   # Trading data exports
+*.txt                   # Text data files (might contain sensitive info)
+*.xlsx                  # Excel files with trading data
+*.json                  # JSON files (might contain API keys)
+backtest_*.html         # Backtest reports (contain performance data)
+report_*.html           # Trading reports
+
+# ============ CONFIGURATION FILES ============
+# Files that might contain API keys or account info
+config.ini              # Configuration files
+settings.json           # Settings files
+accounts.txt            # Account information
+api_keys.txt            # API keys
+broker_config.*         # Broker configuration
+
+# ============ TEMPORARY FILES ============
+# System and temporary files
+*.tmp                   # Temporary files
+*.temp                  # Temporary files
+*.cache                 # Cache files
+*.bak                   # Backup files
+*.swp                   # Swap files
+~$*                     # Office temporary files
+.DS_Store               # macOS files
+Thumbs.db               # Windows thumbnails
+desktop.ini             # Windows desktop files
+
+# ============ DIRECTORIES TO IGNORE ============
+# Large or sensitive directories
+data/                   # Trading data directory
+models/                 # Model storage directory
+exports/                # Export directory
+temp/                   # Temporary directory
+cache/                  # Cache directory
+__pycache__/            # Python cache (if using Python scripts)
+.vscode/                # VS Code settings (personal preferences)
+.idea/                  # IntelliJ IDEA settings
+
+# ============ WHAT TO INCLUDE ============
+# The following files SHOULD be committed:
+# *.mq5                 # Source code files (already excluded from ignore)
+# *.mqh                 # Header files
+# README.md             # Documentation
+# LICENSE               # License file
+# *.md                  # Markdown documentation
+
+# ============ IMPORTANT SECURITY NOTE ============
+# NEVER commit:
+# - Real account numbers
+# - API keys or passwords  
+# - Actual trading models (they contain proprietary data)
+# - Live trading results
+# - Broker connection details
