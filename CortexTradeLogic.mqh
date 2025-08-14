@@ -22,7 +22,7 @@
 
 //============================== CONSTANTS ==============================
 // These constants must match across all components
-#define STATE_SIZE 35
+#define STATE_SIZE 45  // IMPROVEMENT 4.3: Updated to match enhanced 45-feature state vector
 #define ACTIONS 6
 
 // Action definitions
@@ -52,13 +52,61 @@
 struct TradeRecord {
     datetime open_time;
     datetime close_time;
-    int      position_type;  // POS_LONG or POS_SHORT
+    int      action;         // Trading action taken
+    int      position_type;  // POS_LONG or POS_SHORT  
     double   entry_price;
     double   exit_price;
     double   lots;
     double   profit_loss;
-    string   reason;         // Exit reason
-    int      holding_hours;  // Duration in hours
+    double   balance_after;  // Account balance after trade
+    double   drawdown_pct;   // Drawdown percentage
+    // IMPROVEMENT 7.2: Enhanced trade tracking
+    double   mae;              // Maximum Adverse Excursion
+    double   mfe;              // Maximum Favorable Excursion
+    int      holding_time_hours; // Trade duration in hours
+    string   exit_reason;      // Why the trade was closed
+    double   commission;       // Trading costs
+    double   confidence_score; // Model confidence for this trade
+    
+    // Copy constructor to avoid deprecation warnings
+    TradeRecord(const TradeRecord &other) {
+        open_time = other.open_time;
+        close_time = other.close_time;
+        action = other.action;
+        position_type = other.position_type;
+        entry_price = other.entry_price;
+        exit_price = other.exit_price;
+        lots = other.lots;
+        profit_loss = other.profit_loss;
+        balance_after = other.balance_after;
+        drawdown_pct = other.drawdown_pct;
+        mae = other.mae;
+        mfe = other.mfe;
+        holding_time_hours = other.holding_time_hours;
+        exit_reason = other.exit_reason;
+        commission = other.commission;
+        confidence_score = other.confidence_score;
+    }
+    
+    // Default constructor
+    TradeRecord() {
+        open_time = 0;
+        close_time = 0;
+        action = HOLD;
+        position_type = POS_NONE;
+        entry_price = 0.0;
+        exit_price = 0.0;
+        lots = 0.0;
+        profit_loss = 0.0;
+        balance_after = 0.0;
+        drawdown_pct = 0.0;
+        mae = 0.0;
+        mfe = 0.0;
+        holding_time_hours = 0;
+        exit_reason = "";
+        commission = 0.0;
+        confidence_score = 0.5;
+    }
 };
 
 // Risk metrics structure

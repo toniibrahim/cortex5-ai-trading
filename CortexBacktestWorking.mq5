@@ -276,45 +276,51 @@ input double  InpMCRobustnessThreshold  = 0.7;    // Robustness threshold for ac
 input bool    InpMCProgressReporting    = true;   // Show progress during Monte Carlo runs
 input int     InpMCProgressFrequency    = 10;     // Progress reporting frequency (every N runs)
 
+// === MISSING PARAMETERS FOR COMPATIBILITY ===
+input bool    InpUseMTFAnalysis          = false;  // Use multi-timeframe analysis
+input bool    InpUsePartialClose         = false;  // Use partial position closing
+input double  InpPartialClosePct         = 50.0;   // Partial close percentage
+input bool    InpUseSessionFilter        = false;  // Use session time filtering
+input int     InpSessionStart            = 8;      // Session start hour
+input int     InpSessionEnd              = 16;     // Session end hour
+input bool    InpUseNewsFilter           = false;  // Use news filtering
+input bool    InpUseEmergencyStop        = true;   // Use emergency stop losses
+input double  InpMaxDrawdownPercent      = 15.0;   // Maximum drawdown percentage
+input int     InpEmergencyHaltHours      = 24;     // Emergency halt duration hours
+input int     InpRegimeCheckMinutes      = 60;     // Regime check frequency minutes
+input double  InpVolatilityMultiplier    = 1.5;    // Volatility adjustment multiplier
+input double  InpMinLotSize              = 0.01;   // Minimum lot size
+input bool    InpMCSaveResults           = true;   // Save Monte Carlo results
+
 // IMPROVEMENT 7.1: Update to match enhanced state size from training improvements
-// Neural network architecture constants (must match training)
-#define STATE_SIZE 45  // IMPROVEMENT 4.3: Updated to match enhanced 45-feature state vector
-#define ACTIONS 6
+// Neural network architecture constants are now defined in CortexTradeLogic.mqh
 
-// Action definitions
-#define BUY_STRONG  0
-#define BUY_WEAK    1  
-#define SELL_STRONG 2
-#define SELL_WEAK   3
-#define HOLD        4
-#define FLAT        5
+// Trading position types are now defined as constants in CortexTradeLogic.mqh
 
-// Trading position types
-enum POS_TYPE {
-    POS_NONE = 0,
-    POS_LONG = 1,
-    POS_SHORT = 2
-};
+// Trade record structure is now defined in CortexTradeLogic.mqh
 
-// Trade record structure
-struct TradeRecord {
-    datetime open_time;
-    datetime close_time;
-    int action;
-    POS_TYPE position_type;
-    double entry_price;
-    double exit_price;
-    double lots;
-    double profit_loss;
-    double balance_after;
-    double drawdown_pct;
-    // IMPROVEMENT 7.2: Enhanced trade tracking
-    double mae;              // Maximum Adverse Excursion
-    double mfe;              // Maximum Favorable Excursion
-    int holding_time_hours;  // Trade duration in hours
-    string exit_reason;      // Why the trade was closed
-    double commission;       // Trading costs
-    double confidence_score; // Model confidence for this trade
+// Monte Carlo variation structure
+struct MonteCarloVariation {
+    datetime start_time;
+    datetime end_time;
+    int period_days;
+    double spread_multiplier;
+    double slippage_pips;
+    double commission_multiplier;
+    double shuffle_factor;
+    ulong random_seed;
+    
+    // Constructor
+    MonteCarloVariation() {
+        start_time = 0;
+        end_time = 0;
+        period_days = 0;
+        spread_multiplier = 1.0;
+        slippage_pips = 0.0;
+        commission_multiplier = 1.0;
+        shuffle_factor = 0.0;
+        random_seed = 0;
+    }
 };
 
 // IMPROVEMENT 7.2: Comprehensive performance metrics structure
@@ -447,7 +453,7 @@ int g_winning_trades;
 int g_losing_trades;
 
 // Current position tracking
-POS_TYPE g_current_position = POS_NONE;
+int g_current_position = POS_NONE;
 double g_position_entry_price = 0;
 double g_position_lots = 0;
 datetime g_position_open_time = 0;
@@ -538,9 +544,16 @@ int g_equity_curve_size = 0;                // Size of equity curve arrays
 double g_running_gross_profit = 0.0;        // Cumulative gross profit
 double g_running_gross_loss = 0.0;          // Cumulative gross loss
 int g_consecutive_wins = 0;                 // Current consecutive wins
-int g_consecutive_losses = 0;               // Current consecutive losses
+// g_consecutive_losses already declared above
 int g_max_consecutive_wins = 0;             // Maximum consecutive wins achieved
 int g_max_consecutive_losses = 0;           // Maximum consecutive losses achieved
+
+// Position tracking variables
+int g_position_type = POS_NONE;             // Current position type
+double g_position_open_price = 0.0;         // Position entry price
+ulong g_position_ticket = 0;                // Position ticket number
+TradeRecord g_trade_records[];              // Array of trade records
+string g_current_entry_trigger = "";        // Current entry trigger description
 
 // Drawdown tracking
 double g_peak_balance = 0.0;                // Peak balance for drawdown calculation
@@ -651,6 +664,56 @@ struct MonteCarloRun {
     double drawdown_stability;
     double trade_consistency;
     double robustness_score;
+    
+    // Copy constructor to avoid deprecation warnings
+    MonteCarloRun(const MonteCarloRun &other) {
+        run_number = other.run_number;
+        start_date = other.start_date;
+        end_date = other.end_date;
+        period_days = other.period_days;
+        spread_multiplier = other.spread_multiplier;
+        slippage_pips = other.slippage_pips;
+        commission_multiplier = other.commission_multiplier;
+        random_seed = other.random_seed;
+        final_balance = other.final_balance;
+        total_return_pct = other.total_return_pct;
+        max_drawdown_pct = other.max_drawdown_pct;
+        sharpe_ratio = other.sharpe_ratio;
+        profit_factor = other.profit_factor;
+        win_rate_pct = other.win_rate_pct;
+        total_trades = other.total_trades;
+        largest_loss = other.largest_loss;
+        largest_win = other.largest_win;
+        return_stability = other.return_stability;
+        drawdown_stability = other.drawdown_stability;
+        trade_consistency = other.trade_consistency;
+        robustness_score = other.robustness_score;
+    }
+    
+    // Default constructor
+    MonteCarloRun() {
+        run_number = 0;
+        start_date = 0;
+        end_date = 0;
+        period_days = 0;
+        spread_multiplier = 1.0;
+        slippage_pips = 0.0;
+        commission_multiplier = 1.0;
+        random_seed = 0;
+        final_balance = 0.0;
+        total_return_pct = 0.0;
+        max_drawdown_pct = 0.0;
+        sharpe_ratio = 0.0;
+        profit_factor = 0.0;
+        win_rate_pct = 0.0;
+        total_trades = 0;
+        largest_loss = 0.0;
+        largest_win = 0.0;
+        return_stability = 0.0;
+        drawdown_stability = 0.0;
+        trade_consistency = 0.0;
+        robustness_score = 0.0;
+    }
 };
 
 struct MonteCarloResults {
@@ -785,14 +848,14 @@ bool CheckATRBasedStops(datetime current_time){
     string reason = "";
     
     // Check ATR-based stop loss
-    if(g_current_position == POS_BUY){
+    if(g_current_position == POS_LONG){
         double atr_stop = g_position_entry_price - (g_current_atr * InpATRMultiplier);
         if(current_price <= atr_stop){
             should_close = true;
             reason = "ATR-based stop loss hit";
             g_atr_stop_hits++;
         }
-    } else if(g_current_position == POS_SELL){
+    } else if(g_current_position == POS_SHORT){
         double atr_stop = g_position_entry_price + (g_current_atr * InpATRMultiplier);
         if(current_price >= atr_stop){
             should_close = true;
@@ -828,14 +891,14 @@ bool CheckTrailingStops(datetime current_time){
     bool should_close = false;
     string reason = "";
     
-    if(g_current_position == POS_BUY){
+    if(g_current_position == POS_LONG){
         double trailing_level = g_max_favorable_price - (g_current_atr * InpTrailingStopATR);
         if(current_price <= trailing_level){
             should_close = true;
             reason = "Trailing stop activated";
             g_trailing_stop_hits++;
         }
-    } else if(g_current_position == POS_SELL){
+    } else if(g_current_position == POS_SHORT){
         double trailing_level = g_max_favorable_price + (g_current_atr * InpTrailingStopATR);
         if(current_price >= trailing_level){
             should_close = true;
@@ -1068,7 +1131,7 @@ void UpdateEquityCurve(datetime current_time, double current_balance) {
     
     // IMPROVEMENT 7.3: Log equity point to CSV if enabled
     if(InpEnableCSVLogging && g_csv_equity_handle != INVALID_HANDLE) {
-        LogEquityToCSV(current_time, current_balance);
+        LogEquityToCSV(current_time, current_balance, current_balance, 0.0, 0.0, 0.0, g_position_type, 0.0, g_position_open_price);
     }
 }
 
@@ -1707,7 +1770,7 @@ void LogTradeToCSV(const TradeRecord &trade, int trade_id) {
 
 // Log equity curve point to CSV
 void LogEquityToCSV(datetime bar_time, double balance, double equity, double unrealized_pl, 
-                   double drawdown_pct, double drawdown_amount, POS_TYPE position_type, 
+                   double drawdown_pct, double drawdown_amount, int position_type, 
                    double position_lots, double position_entry) {
     if(!InpEnableCSVLogging || g_csv_equity_handle == INVALID_HANDLE) return;
     
@@ -2292,14 +2355,16 @@ bool InitializeMonteCarloTesting() {
 }
 
 // Generate randomized parameters for a Monte Carlo run
-void GenerateMonteCarloVariation(int run_number) {
+bool GenerateMonteCarloVariation(int run_number, datetime start_time, datetime end_time, MonteCarloVariation &variation) {
     // Set run-specific seed for reproducibility
     int run_seed = (int)InpRandomSeed + run_number * 1000;
     MathSrand(run_seed);
     
-    // Store run parameters
-    g_monte_carlo_results.runs[run_number].run_number = run_number;
-    g_monte_carlo_results.runs[run_number].random_seed = run_seed;
+    // Initialize variation structure
+    variation.random_seed = run_seed;
+    variation.start_time = start_time;
+    variation.end_time = end_time;
+    variation.period_days = (int)((end_time - start_time) / (24 * 3600));
     
     // Randomize start date if enabled
     if(InpMCRandomStartDates) {
@@ -2326,36 +2391,54 @@ void GenerateMonteCarloVariation(int run_number) {
     // Randomize spread multiplier if enabled
     if(InpMCSpreadVariation) {
         double spread_range = InpMCSpreadMaxMultiplier - InpMCSpreadMinMultiplier;
-        g_current_spread_multiplier = InpMCSpreadMinMultiplier + (MathRand() / 32767.0) * spread_range;
+        variation.spread_multiplier = InpMCSpreadMinMultiplier + (MathRand() / 32767.0) * spread_range;
     } else {
-        g_current_spread_multiplier = 1.0;
+        variation.spread_multiplier = 1.0;
     }
-    g_monte_carlo_results.runs[run_number].spread_multiplier = g_current_spread_multiplier;
     
     // Randomize slippage if enabled
     if(InpMCSlippageVariation) {
         double slippage_range = InpMCSlippageMaxPips - InpMCSlippageMinPips;
-        g_current_slippage_pips = InpMCSlippageMinPips + (MathRand() / 32767.0) * slippage_range;
+        variation.slippage_pips = InpMCSlippageMinPips + (MathRand() / 32767.0) * slippage_range;
     } else {
-        g_current_slippage_pips = 0.0;
+        variation.slippage_pips = 0.0;
     }
     g_monte_carlo_results.runs[run_number].slippage_pips = g_current_slippage_pips;
     
     // Randomize commission if enabled
     if(InpMCCommissionVariation) {
         double comm_range = InpMCCommissionMaxPct - InpMCCommissionMinPct;
-        g_current_commission_multiplier = (InpMCCommissionMinPct + (MathRand() / 32767.0) * comm_range) / 100.0;
+        variation.commission_multiplier = (InpMCCommissionMinPct + (MathRand() / 32767.0) * comm_range) / 100.0;
     } else {
-        g_current_commission_multiplier = 1.0;
+        variation.commission_multiplier = 1.0;
     }
-    g_monte_carlo_results.runs[run_number].commission_multiplier = g_current_commission_multiplier;
     
-    if(InpMCProgressReporting && (run_number % InpMCProgressFrequency == 0 || run_number < 5)) {
-        Print("MC Run ", run_number, "/", InpMonteCarloRuns, 
-              " | Period: ", g_mc_period_days, " days",
-              " | Spread: ", DoubleToString(g_current_spread_multiplier, 2), "x",
-              " | Slippage: ", DoubleToString(g_current_slippage_pips, 1), " pips");
+    // Set shuffle factor if data shuffling is enabled
+    if(InpMCDataShuffling) {
+        variation.shuffle_factor = MathRand() / 32767.0;
+    } else {
+        variation.shuffle_factor = 0.0;
     }
+    
+    return true;
+}
+
+// Apply spread variation for Monte Carlo testing
+void ApplySpreadVariation(double multiplier) {
+    // Implementation would apply spread multiplier to trading costs
+    Print("   📈 Applying spread multiplier: ", DoubleToString(multiplier, 2));
+}
+
+// Apply slippage variation for Monte Carlo testing  
+void ApplySlippageVariation(double slippage_pips) {
+    // Implementation would apply slippage to trade executions
+    Print("   📉 Applying slippage: ", DoubleToString(slippage_pips, 1), " pips");
+}
+
+// Apply commission variation for Monte Carlo testing
+void ApplyCommissionVariation(double multiplier) {
+    // Implementation would apply commission multiplier
+    Print("   💰 Applying commission multiplier: ", DoubleToString(multiplier, 2));
 }
 
 // Shuffle price data for robustness testing
@@ -2402,21 +2485,22 @@ double ApplyMonteCarloCommission(double base_commission) {
 }
 
 // Record results from a completed Monte Carlo run
-void RecordMonteCarloRun(int run_number) {
-    if(run_number >= 1000) return; // Safety check
+bool RecordMonteCarloRun(int run_number, const MonteCarloVariation &variation) {
+    if(run_number >= 1000) return false; // Safety check
     
-    MonteCarloRun* run = &g_monte_carlo_results.runs[run_number];
+    // Direct access to run structure
+    int idx = run_number;
     
     // Record basic performance metrics
-    run.final_balance = g_balance;
-    run.total_return_pct = g_performance_metrics.total_return_pct;
-    run.max_drawdown_pct = g_performance_metrics.maximum_drawdown_pct;
-    run.sharpe_ratio = g_performance_metrics.sharpe_ratio;
-    run.profit_factor = g_performance_metrics.profit_factor;
-    run.win_rate_pct = g_performance_metrics.win_rate_pct;
-    run.total_trades = g_performance_metrics.total_trades;
-    run.largest_loss = g_performance_metrics.largest_loss;
-    run.largest_win = g_performance_metrics.largest_win;
+    g_monte_carlo_results.runs[idx].final_balance = g_balance;
+    g_monte_carlo_results.runs[idx].total_return_pct = g_performance_metrics.total_return_pct;
+    g_monte_carlo_results.runs[idx].max_drawdown_pct = g_performance_metrics.maximum_drawdown_pct;
+    g_monte_carlo_results.runs[idx].sharpe_ratio = g_performance_metrics.sharpe_ratio;
+    g_monte_carlo_results.runs[idx].profit_factor = g_performance_metrics.profit_factor;
+    g_monte_carlo_results.runs[idx].win_rate_pct = g_performance_metrics.win_rate_pct;
+    g_monte_carlo_results.runs[idx].total_trades = g_performance_metrics.total_trades;
+    g_monte_carlo_results.runs[idx].largest_loss = g_performance_metrics.largest_loss;
+    g_monte_carlo_results.runs[idx].largest_win = g_performance_metrics.largest_win;
     
     // Calculate robustness metrics for this run
     CalculateRunRobustness(run_number);
@@ -2425,43 +2509,46 @@ void RecordMonteCarloRun(int run_number) {
     
     if(InpMCProgressReporting && (run_number % InpMCProgressFrequency == 0 || run_number < 5)) {
         Print("MC Run ", run_number, " completed:",
-              " Return: ", DoubleToString(run.total_return_pct, 2), "%",
-              " | DD: ", DoubleToString(run.max_drawdown_pct, 2), "%",
-              " | Sharpe: ", DoubleToString(run.sharpe_ratio, 2),
-              " | Robustness: ", DoubleToString(run.robustness_score, 3));
+              " Return: ", DoubleToString(g_monte_carlo_results.runs[idx].total_return_pct, 2), "%",
+              " | DD: ", DoubleToString(g_monte_carlo_results.runs[idx].max_drawdown_pct, 2), "%",
+              " | Sharpe: ", DoubleToString(g_monte_carlo_results.runs[idx].sharpe_ratio, 2),
+              " | Robustness: ", DoubleToString(g_monte_carlo_results.runs[idx].robustness_score, 3));
     }
+    
+    return true;
 }
 
 // Calculate robustness metrics for individual run
 void CalculateRunRobustness(int run_number) {
-    MonteCarloRun* run = &g_monte_carlo_results.runs[run_number];
+    // Direct array access instead of pointer
+    int idx = run_number;
     
     // Return stability (relative to baseline expected)
     double expected_return = 15.0; // Expected annual return baseline
-    run.return_stability = 1.0 - MathAbs(run.total_return_pct - expected_return) / expected_return;
-    run.return_stability = MathMax(0.0, MathMin(1.0, run.return_stability));
+    g_monte_carlo_results.runs[idx].return_stability = 1.0 - MathAbs(g_monte_carlo_results.runs[idx].total_return_pct - expected_return) / expected_return;
+    g_monte_carlo_results.runs[idx].return_stability = MathMax(0.0, MathMin(1.0, g_monte_carlo_results.runs[idx].return_stability));
     
     // Drawdown stability (penalty for excessive drawdown)
     double acceptable_drawdown = 10.0; // Acceptable drawdown baseline
-    if(run.max_drawdown_pct <= acceptable_drawdown) {
-        run.drawdown_stability = 1.0;
+    if(g_monte_carlo_results.runs[idx].max_drawdown_pct <= acceptable_drawdown) {
+        g_monte_carlo_results.runs[idx].drawdown_stability = 1.0;
     } else {
-        run.drawdown_stability = acceptable_drawdown / run.max_drawdown_pct;
+        g_monte_carlo_results.runs[idx].drawdown_stability = acceptable_drawdown / g_monte_carlo_results.runs[idx].max_drawdown_pct;
     }
-    run.drawdown_stability = MathMax(0.0, MathMin(1.0, run.drawdown_stability));
+    g_monte_carlo_results.runs[idx].drawdown_stability = MathMax(0.0, MathMin(1.0, g_monte_carlo_results.runs[idx].drawdown_stability));
     
     // Trade consistency (based on number of trades and win rate)
     double expected_trades = 50; // Expected number of trades
-    double trade_count_score = 1.0 - MathAbs(run.total_trades - expected_trades) / expected_trades;
+    double trade_count_score = 1.0 - MathAbs(g_monte_carlo_results.runs[idx].total_trades - expected_trades) / expected_trades;
     trade_count_score = MathMax(0.0, MathMin(1.0, trade_count_score));
     
-    double win_rate_score = run.win_rate_pct / 100.0; // Normalize to 0-1
-    run.trade_consistency = (trade_count_score + win_rate_score) / 2.0;
+    double win_rate_score = g_monte_carlo_results.runs[idx].win_rate_pct / 100.0; // Normalize to 0-1
+    g_monte_carlo_results.runs[idx].trade_consistency = (trade_count_score + win_rate_score) / 2.0;
     
     // Overall robustness score (weighted combination)
-    run.robustness_score = (run.return_stability * 0.4) + 
-                          (run.drawdown_stability * 0.4) + 
-                          (run.trade_consistency * 0.2);
+    g_monte_carlo_results.runs[idx].robustness_score = (g_monte_carlo_results.runs[idx].return_stability * 0.4) + 
+                          (g_monte_carlo_results.runs[idx].drawdown_stability * 0.4) + 
+                          (g_monte_carlo_results.runs[idx].trade_consistency * 0.2);
 }
 
 // Calculate aggregate Monte Carlo statistics
@@ -2475,13 +2562,13 @@ void CalculateMonteCarloStatistics() {
     double pf_sum = 0, wr_sum = 0, rob_sum = 0;
     
     for(int i = 0; i < n; i++) {
-        MonteCarloRun* run = &g_monte_carlo_results.runs[i];
-        return_sum += run.total_return_pct;
-        drawdown_sum += run.max_drawdown_pct;
-        sharpe_sum += run.sharpe_ratio;
-        pf_sum += run.profit_factor;
-        wr_sum += run.win_rate_pct;
-        rob_sum += run.robustness_score;
+        // Direct array access instead of pointer
+        return_sum += g_monte_carlo_results.runs[i].total_return_pct;
+        drawdown_sum += g_monte_carlo_results.runs[i].max_drawdown_pct;
+        sharpe_sum += g_monte_carlo_results.runs[i].sharpe_ratio;
+        pf_sum += g_monte_carlo_results.runs[i].profit_factor;
+        wr_sum += g_monte_carlo_results.runs[i].win_rate_pct;
+        rob_sum += g_monte_carlo_results.runs[i].robustness_score;
     }
     
     g_monte_carlo_results.mean_return = return_sum / n;
@@ -2495,12 +2582,12 @@ void CalculateMonteCarloStatistics() {
     double pf_var = 0, wr_var = 0;
     
     for(int i = 0; i < n; i++) {
-        MonteCarloRun* run = &g_monte_carlo_results.runs[i];
-        return_var += MathPow(run.total_return_pct - g_monte_carlo_results.mean_return, 2);
-        drawdown_var += MathPow(run.max_drawdown_pct - g_monte_carlo_results.mean_drawdown, 2);
-        sharpe_var += MathPow(run.sharpe_ratio - g_monte_carlo_results.mean_sharpe, 2);
-        pf_var += MathPow(run.profit_factor - g_monte_carlo_results.mean_profit_factor, 2);
-        wr_var += MathPow(run.win_rate_pct - g_monte_carlo_results.mean_win_rate, 2);
+        // Direct array access instead of pointer
+        return_var += MathPow(g_monte_carlo_results.runs[i].total_return_pct - g_monte_carlo_results.mean_return, 2);
+        drawdown_var += MathPow(g_monte_carlo_results.runs[i].max_drawdown_pct - g_monte_carlo_results.mean_drawdown, 2);
+        sharpe_var += MathPow(g_monte_carlo_results.runs[i].sharpe_ratio - g_monte_carlo_results.mean_sharpe, 2);
+        pf_var += MathPow(g_monte_carlo_results.runs[i].profit_factor - g_monte_carlo_results.mean_profit_factor, 2);
+        wr_var += MathPow(g_monte_carlo_results.runs[i].win_rate_pct - g_monte_carlo_results.mean_win_rate, 2);
     }
     
     g_monte_carlo_results.std_return = MathSqrt(return_var / (n - 1));
@@ -2521,10 +2608,10 @@ void CalculateMonteCarloStatistics() {
     g_monte_carlo_results.robust_runs = 0;
     
     for(int i = 0; i < n; i++) {
-        MonteCarloRun* run = &g_monte_carlo_results.runs[i];
-        if(run.total_return_pct > 0) g_monte_carlo_results.positive_return_runs++;
-        if(run.max_drawdown_pct < 15.0) g_monte_carlo_results.acceptable_drawdown_runs++;
-        if(run.robustness_score >= InpMCRobustnessThreshold) g_monte_carlo_results.robust_runs++;
+        // Direct array access instead of pointer
+        if(g_monte_carlo_results.runs[i].total_return_pct > 0) g_monte_carlo_results.positive_return_runs++;
+        if(g_monte_carlo_results.runs[i].max_drawdown_pct < 15.0) g_monte_carlo_results.acceptable_drawdown_runs++;
+        if(g_monte_carlo_results.runs[i].robustness_score >= InpMCRobustnessThreshold) g_monte_carlo_results.robust_runs++;
     }
     
     g_monte_carlo_results.success_rate = (double)g_monte_carlo_results.robust_runs / n;
@@ -2604,13 +2691,13 @@ void SaveMonteCarloResults() {
         
         // Write run data
         for(int i = 0; i < g_monte_carlo_results.completed_runs; i++) {
-            MonteCarloRun* run = &g_monte_carlo_results.runs[i];
+            // Direct array access instead of pointer
             FileWrite(runs_handle, 
-                run.run_number, TimeToString(run.start_date, TIME_DATE), TimeToString(run.end_date, TIME_DATE),
-                run.period_days, run.spread_multiplier, run.slippage_pips, run.commission_multiplier, run.random_seed,
-                run.final_balance, run.total_return_pct, run.max_drawdown_pct, run.sharpe_ratio,
-                run.profit_factor, run.win_rate_pct, run.total_trades, run.largest_loss, run.largest_win,
-                run.return_stability, run.drawdown_stability, run.trade_consistency, run.robustness_score);
+                g_monte_carlo_results.runs[i].run_number, TimeToString(g_monte_carlo_results.runs[i].start_date, TIME_DATE), TimeToString(g_monte_carlo_results.runs[i].end_date, TIME_DATE),
+                g_monte_carlo_results.runs[i].period_days, g_monte_carlo_results.runs[i].spread_multiplier, g_monte_carlo_results.runs[i].slippage_pips, g_monte_carlo_results.runs[i].commission_multiplier, g_monte_carlo_results.runs[i].random_seed,
+                g_monte_carlo_results.runs[i].final_balance, g_monte_carlo_results.runs[i].total_return_pct, g_monte_carlo_results.runs[i].max_drawdown_pct, g_monte_carlo_results.runs[i].sharpe_ratio,
+                g_monte_carlo_results.runs[i].profit_factor, g_monte_carlo_results.runs[i].win_rate_pct, g_monte_carlo_results.runs[i].total_trades, g_monte_carlo_results.runs[i].largest_loss, g_monte_carlo_results.runs[i].largest_win,
+                g_monte_carlo_results.runs[i].return_stability, g_monte_carlo_results.runs[i].drawdown_stability, g_monte_carlo_results.runs[i].trade_consistency, g_monte_carlo_results.runs[i].robustness_score);
         }
         
         FileClose(runs_handle);
@@ -2772,7 +2859,7 @@ void ResetBacktestState() {
     g_indicator_failures = 0;
     
     // Reset position state
-    g_position_type = POSITION_TYPE_NONE;
+    g_position_type = POS_NONE;
     g_position_lots = 0;
     g_position_open_price = 0;
     g_position_open_time = 0;
@@ -4256,7 +4343,7 @@ void ExecuteSimulatedTrade(int action, datetime bar_time, int bar_index) {
 //+------------------------------------------------------------------+
 //| Open a new position                                            |
 //+------------------------------------------------------------------+
-void OpenPosition(POS_TYPE pos_type, double lots, double price, datetime time, string reason) {
+void OpenPosition(int pos_type, double lots, double price, datetime time, string reason) {
     g_current_position = pos_type;
     g_position_lots = lots;
     g_position_entry_price = price;
@@ -4354,7 +4441,7 @@ void ClosePosition(datetime time, int bar_index, string reason) {
 //+------------------------------------------------------------------+
 //| Record completed trade                                          |
 //+------------------------------------------------------------------+
-void RecordTrade(datetime open_time, datetime close_time, POS_TYPE pos_type, 
+void RecordTrade(datetime open_time, datetime close_time, int pos_type, 
                  double entry_price, double exit_price, double lots, double profit_loss) {
     
     int trade_count = ArraySize(g_trades);

@@ -4081,7 +4081,7 @@ void InitializeLoggingOptimization() {
     g_last_batch_log_count = 0;
     
     // Record start time for performance measurement
-    g_logging_start_time = GetMicrosecondCount();
+    g_logging_start_time = (datetime)GetMicrosecondCount();
     
     g_logging_optimization_initialized = true;
     
@@ -4191,7 +4191,7 @@ bool ShouldLog(bool is_debug = false, bool is_important = false) {
 void LogLoggingPerformance() {
     if(!InpLimitTrainingLogs && !InpQuietMode) return;
     
-    g_logging_end_time = GetMicrosecondCount();
+    g_logging_end_time = (datetime)GetMicrosecondCount();
     g_logging_stats.post_optimization_time = (double)(g_logging_end_time - g_logging_start_time) / 1000000.0;
     
     Print("");
@@ -5766,10 +5766,10 @@ HyperparameterSet GenerateRandomParameters() {
     // Exploration parameters
     params.eps_start = 0.8 + 0.4 * (MathRand() / 32767.0); // 0.8 to 1.2
     params.eps_end = 0.01 + 0.09 * (MathRand() / 32767.0); // 0.01 to 0.1
-    params.eps_decay_steps = 30000 + 40000 * (MathRand() / 32767.0); // 30k to 70k
+    params.eps_decay_steps = (int)(30000 + 40000 * (MathRand() / 32767.0)); // 30k to 70k
     
     // Target sync frequency
-    params.target_sync = 1000 + 4000 * (MathRand() / 32767.0); // 1k to 5k
+    params.target_sync = (int)(1000 + 4000 * (MathRand() / 32767.0)); // 1k to 5k
     
     // PER parameters
     params.per_alpha = 0.3 + 0.6 * (MathRand() / 32767.0); // 0.3 to 0.9
