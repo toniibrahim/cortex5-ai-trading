@@ -158,28 +158,31 @@ double ATR_Proxy(const MqlRates &rates[], int index, int period) {
 
 // Calculate EMA slope for trend detection
 double EMA_Slope(const MqlRates &rates[], int index, int period) {
-    if(index + period + 1 >= ArraySize(rates)) return 0.0;
+    // BUGFIX: Improved bounds checking for array access safety
+    int array_size = ArraySize(rates);
+    if(index >= array_size || index < 0 || period <= 0) return 0.0;
+    if(index + period + 1 >= array_size) return 0.0;
     
     double alpha = 2.0 / (period + 1);
     double ema = 0.0;
     int n = 0;
     
-    // Calculate current EMA
+    // Calculate current EMA - BUGFIX: Added additional bounds checking
     for(int k = period; k >= 0; k--) {
         int idx = index + k;
-        if(idx >= ArraySize(rates)) continue;
+        if(idx >= array_size || idx < 0) continue;
         
         if(n == 0) ema = rates[idx].close;
         else ema = alpha * rates[idx].close + (1 - alpha) * ema;
         n++;
     }
     
-    // Calculate previous EMA
+    // Calculate previous EMA - BUGFIX: Added additional bounds checking
     double ema_prev = 0.0;
     n = 0;
     for(int k = period + 1; k >= 1; k--) {
         int idx = index + k;
-        if(idx >= ArraySize(rates)) continue;
+        if(idx >= array_size || idx < 0) continue;
         
         if(n == 0) ema_prev = rates[idx].close;
         else ema_prev = alpha * rates[idx].close + (1 - alpha) * ema_prev;
