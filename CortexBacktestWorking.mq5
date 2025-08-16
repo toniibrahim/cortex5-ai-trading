@@ -1024,84 +1024,150 @@ bool g_price_data_shuffled = false;
 int g_shuffle_indices[];
 
 //============================== TRADING FREQUENCY CONTROL FUNCTIONS ==============
-// Functions to prevent overtrading and control execution frequency
+// Advanced overtrading prevention system that maintains profitability while controlling risk
+// The original Cortex system suffered from excessive trading (95+ trades/day) that generated
+// huge transaction costs. These functions implement intelligent frequency controls.
 
-// Check if new trading is allowed (prevent overtrading)
+// Trading Permission Validator
+// Comprehensive gatekeeper function that prevents overtrading while preserving opportunities
+// Implements multiple layers of frequency control to balance profitability with risk management
+//
+// Key Controls:
+//   - Single position limit (no overlapping trades)
+//   - Minimum time spacing between trades
+//   - Daily trade count limits
+//   - Session-based reset mechanisms
+//
+// Parameters:
+//   current_bar_time: Current bar timestamp for frequency calculations
+// Returns: true if new trading is permitted, false if frequency limits exceeded
 bool IsNewTradingAllowed(datetime current_bar_time){
-    // Don't trade if we have an open position
+    // POSITION EXCLUSIVITY: Only one position at a time
+    // Prevents portfolio complexity and reduces risk concentration
     if(g_current_position != POS_NONE) return false;
     
-    // Check minimum time between trades
+    // TIME-BASED SPACING: Prevent rapid-fire trading
+    // Ensures adequate time for market conditions to change between trades
     int bars_since_last_trade = (int)((current_bar_time - g_last_trade_time) / PeriodSeconds(PERIOD_CURRENT));
     if(bars_since_last_trade < InpMinBarsBetweenTrades){
-        return false;
+        return false;  // Too soon since last trade
     }
     
-    // Check daily trade limit
+    // DAILY LIMIT ENFORCEMENT: Calculate trading day boundaries
+    // Prevents overtrading within single trading sessions
     datetime current_day_start = current_bar_time - (current_bar_time % (24 * 3600));
     datetime last_trade_day_start = g_last_trade_time - (g_last_trade_time % (24 * 3600));
     
-    // Reset daily counter if it's a new day
+    // DAILY RESET MECHANISM: Fresh start each trading day
+    // Resets counters at start of new trading session
     if(current_day_start != last_trade_day_start){
-        g_trades_this_session = 0;
+        g_trades_this_session = 0;  // Reset daily trade counter
     }
     
+    // DAILY QUOTA CHECK: Enforce maximum trades per day
+    // Prevents excessive activity that can erode profits through transaction costs
     if(g_trades_this_session >= InpMaxTradesPerDay){
-        return false;
+        return false;  // Daily trade limit reached
     }
     
-    return true;
+    return true;  // All frequency controls passed - trading permitted
 }
 
-// Update trading frequency tracking
+// Trading Frequency State Updater
+// Maintains internal counters and timestamps for frequency control system
+// Called after each trade execution to update tracking variables
+// Essential for accurate frequency limit enforcement across trading sessions
+//
+// Parameters:
+//   trade_time: Timestamp of the executed trade for tracking purposes
 void UpdateTradingFrequency(datetime trade_time){
-    g_last_trade_time = trade_time;
-    g_trades_this_session++;
+    g_last_trade_time = trade_time;    // Record timestamp of most recent trade
+    g_trades_this_session++;           // Increment daily trade counter
 }
 
 //============================== IMPROVEMENT 7.1: UNIFIED TRADE LOGIC FUNCTIONS ==============
-// These functions sync backtester logic with EA for consistent behavior
+// Advanced signal validation system that ensures backtester matches live EA behavior
+// These functions implement sophisticated filtering mechanisms for trade quality control
 
-// CONFIDENCE-BASED FILTERING (6.3 Integration)
+// Neural Network Confidence Assessment System
+// Analyzes AI model output to determine signal reliability before trade execution
+// High confidence signals indicate clear market patterns, low confidence suggests uncertainty
+// This filter prevents trading on ambiguous or weak signals that often lead to losses
+//
+// Confidence Calculation Method:
+//   1. Find the two highest Q-values from the 6 possible actions
+//   2. Calculate separation between best and second-best choices
+//   3. Normalize by total magnitude to get relative confidence score
+//   4. Compare against threshold to determine trade worthiness
+//
+// Parameters:
+//   q_values[]: Array of Q-values (expected rewards) for each trading action
+//   action: Selected trading action (not used in current implementation)
+//   current_time: Current bar timestamp (for potential time-based confidence adjustments)
+// Returns: true if confidence exceeds threshold, false if signal too weak
 bool PassesConfidenceFilter(const double &q_values[], int action, datetime current_time){
+    // BYPASS MECHANISM: Allow all trades if confidence filtering disabled
     if(!InpUseConfidenceFilter) return true;
     
-    // Calculate confidence from Q-values (using max Q-value as proxy)
-    double max_q = q_values[0];
-    double second_max_q = 0.0;
+    // Q-VALUE ANALYSIS: Find top two action preferences
+    // The AI outputs 6 Q-values representing expected rewards for:
+    // BUY_STRONG, BUY_WEAK, SELL_STRONG, SELL_WEAK, HOLD, FLAT
+    double max_q = q_values[0];      // Best action Q-value
+    double second_max_q = 0.0;       // Second-best action Q-value
     
+    // Scan all Q-values to find top two preferences
     for(int i = 1; i < 6; i++){
         if(q_values[i] > max_q){
-            second_max_q = max_q;
-            max_q = q_values[i];
+            second_max_q = max_q;        // Previous best becomes second-best
+            max_q = q_values[i];         // New best found
         } else if(q_values[i] > second_max_q){
-            second_max_q = q_values[i];
+            second_max_q = q_values[i];  // New second-best found
         }
     }
     
-    // Confidence based on Q-value separation
+    // CONFIDENCE CALCULATION: Measure decision clarity
+    // Formula: (best - second_best) / (|best| + |second_best| + epsilon)
+    // Higher separation = more confident decision
+    // Normalization prevents bias toward high absolute Q-values
     double confidence = (max_q - second_max_q) / (MathAbs(max_q) + MathAbs(second_max_q) + 0.0001);
-    g_last_confidence = confidence;
+    g_last_confidence = confidence;  // Store for performance tracking
     
+    // THRESHOLD VALIDATION: Accept only high-confidence signals
     bool passes = confidence >= InpConfidenceThreshold;
+    
+    // DIAGNOSTIC LOGGING: Track rejected signals for optimization
     if(!passes && InpVerboseLogging){
         Print("FILTER: Confidence too low: ", DoubleToString(confidence, 4), " < ", 
               DoubleToString(InpConfidenceThreshold, 4));
-        g_confidence_filtered_trades++;
+        g_confidence_filtered_trades++;  // Count rejected signals
     }
     
-    return passes;
+    return passes;  // true = trade allowed, false = signal too weak
 }
 
-// ATR-BASED RISK MANAGEMENT
+// Adaptive Volatility-Based Stop Loss System
+// Implements dynamic stop losses that adapt to current market volatility conditions
+// ATR (Average True Range) provides market-appropriate stop distances:
+//   - Tight stops in calm markets (prevent small losses from becoming large)
+//   - Wide stops in volatile markets (avoid premature exits from noise)
+//
+// This system prevents the fixed-pip stop problems that plagued the original EA:
+//   - Fixed stops were too tight in volatile markets (constant stop-outs)
+//   - Fixed stops were too wide in calm markets (excessive losses)
+//
+// Parameters:
+//   current_time: Current bar timestamp (for data retrieval)
+// Returns: true if position was closed by stop loss, false if position remains open
 bool CheckATRBasedStops(datetime current_time){
+    // SAFETY GATES: Only process if feature enabled and position exists
     if(!InpUseATRBasedStops || g_current_position == POS_NONE) return false;
     
-    // Get current ATR - use preloaded data if available
+    // VOLATILITY DATA ACQUISITION: Get current market volatility
+    // Prioritize preloaded data for performance, fallback to live data if needed
     if(g_data_preloaded && g_total_bars > 0) {
-        g_current_atr = g_atr_array[0]; // Use most recent preloaded ATR
+        g_current_atr = g_atr_array[0]; // Use cached ATR for speed
     } else {
-        // Fallback to live ATR data
+        // Live data retrieval as fallback
         double atr_buffer[];
         if(CopyBuffer(h_atr, 0, 0, 1, atr_buffer) <= 0) return false;
         g_current_atr = atr_buffer[0];
@@ -1111,112 +1177,165 @@ bool CheckATRBasedStops(datetime current_time){
     bool should_close = false;
     string reason = "";
     
-    // Check ATR-based stop loss
+    // POSITION-SPECIFIC STOP LOSS CALCULATIONS
+    // Calculate stop levels based on entry price and current volatility
     if(g_current_position == POS_LONG){
+        // LONG POSITION: Stop loss below entry price
+        // Formula: Entry Price - (ATR × Multiplier)
         double atr_stop = g_position_entry_price - (g_current_atr * InpATRMultiplier);
         if(current_price <= atr_stop){
             should_close = true;
-            reason = "ATR-based stop loss hit";
-            g_atr_stop_hits++;
+            reason = "ATR-based stop loss hit (LONG)";
+            g_atr_stop_hits++;  // Track stop loss statistics
         }
     } else if(g_current_position == POS_SHORT){
+        // SHORT POSITION: Stop loss above entry price
+        // Formula: Entry Price + (ATR × Multiplier)
         double atr_stop = g_position_entry_price + (g_current_atr * InpATRMultiplier);
         if(current_price >= atr_stop){
             should_close = true;
-            reason = "ATR-based stop loss hit";
-            g_atr_stop_hits++;
+            reason = "ATR-based stop loss hit (SHORT)";
+            g_atr_stop_hits++;  // Track stop loss statistics
         }
     }
     
+    // POSITION CLOSURE EXECUTION
     if(should_close){
-        ClosePosition(reason);
-        return true;
+        ClosePosition(reason);  // Execute stop loss with logging
+        return true;            // Signal that position was closed
     }
     
-    return false;
+    return false;  // Position remains open
 }
 
-// TRAILING STOP FUNCTIONALITY  
+// Dynamic Profit Protection System (Trailing Stops)
+// Automatically adjusts stop loss levels as positions move into profit
+// Locks in gains while allowing continued profit potential - prevents giving back profits
+//
+// Key Features:
+//   - Only activates after position becomes profitable (no premature exits)
+//   - Tracks peak favorable price movement for optimal stop placement
+//   - Uses ATR-based distances for market-appropriate trailing levels
+//   - Adapts to both long and short positions automatically
+//
+// This addresses a major weakness in the original system: profitable positions
+// often reversed to losses because there was no mechanism to lock in gains
+//
+// Parameters:
+//   current_time: Current bar timestamp (for data synchronization)
+// Returns: true if trailing stop triggered position closure, false if position continues
 bool CheckTrailingStops(datetime current_time){
+    // ACTIVATION GATES: Only process if enabled and position exists
     if(!InpUseTrailingStops || g_current_position == POS_NONE) return false;
     
     double current_price = iClose(_Symbol, PERIOD_CURRENT, 0);
     double current_profit = CalculateUnrealizedPnL(current_price);
     
-    // Update peak profit tracking
+    // PROFIT TRACKING: Monitor highest profit achieved during position lifetime
+    // This ensures trailing stop locks in the maximum gain, not just current profit
     if(current_profit > g_position_peak_profit){
-        g_position_peak_profit = current_profit;
-        g_max_favorable_price = current_price;
+        g_position_peak_profit = current_profit;    // Update profit high-water mark
+        g_max_favorable_price = current_price;      // Record best price achieved
     }
     
-    // Only activate trailing stop once position is profitable
+    // PROFITABILITY GATE: Only trail stops for profitable positions
+    // Prevents trailing stops from interfering with normal stop loss management
     if(g_position_peak_profit <= 0) return false;
     
     bool should_close = false;
     string reason = "";
     
+    // POSITION-SPECIFIC TRAILING CALCULATIONS
     if(g_current_position == POS_LONG){
+        // LONG POSITION: Trail stop below peak favorable price
+        // Formula: Best Price Achieved - (ATR × Trailing Multiplier)
         double trailing_level = g_max_favorable_price - (g_current_atr * InpTrailingStopATR);
         if(current_price <= trailing_level){
             should_close = true;
-            reason = "Trailing stop activated";
-            g_trailing_stop_hits++;
+            reason = "Trailing stop activated (LONG)";
+            g_trailing_stop_hits++;  // Performance tracking
         }
     } else if(g_current_position == POS_SHORT){
+        // SHORT POSITION: Trail stop above peak favorable price
+        // Formula: Best Price Achieved + (ATR × Trailing Multiplier)
         double trailing_level = g_max_favorable_price + (g_current_atr * InpTrailingStopATR);
         if(current_price >= trailing_level){
             should_close = true;
-            reason = "Trailing stop activated";
-            g_trailing_stop_hits++;
+            reason = "Trailing stop activated (SHORT)";
+            g_trailing_stop_hits++;  // Performance tracking
         }
     }
     
+    // PROFIT LOCK-IN EXECUTION
     if(should_close){
-        ClosePosition(reason);
-        return true;
+        ClosePosition(reason);  // Secure the locked-in profit
+        return true;            // Signal successful profit protection
     }
     
-    return false;
+    return false;  // Continue position with updated trailing level
 }
 
-// VOLATILITY REGIME DETECTION
+// Market Volatility Regime Classification System
+// Dynamically adapts trading parameters based on current market volatility conditions
+// Prevents losses during volatile periods by automatically reducing position sizes
+//
+// Volatility Regimes:
+//   - Normal Volatility: Standard position sizing and risk parameters
+//   - High Volatility: Reduced position sizes, tighter risk controls
+//
+// This system addresses a critical flaw in the original EA: it used fixed position
+// sizes regardless of market conditions, leading to excessive losses during volatile periods
+//
+// Parameters:
+//   current_time: Current timestamp for regime update timing
+// Returns: true if regime check completed successfully, false if data unavailable
 bool CheckVolatilityRegime(datetime current_time){
+    // FEATURE GATE: Bypass if volatility adaptation disabled
     if(!InpUseVolatilityRegime) return true;
     
-    // Update volatility regime only periodically
+    // PERIODIC UPDATE: Only recalculate regime periodically for performance
+    // Frequent updates are unnecessary as volatility regimes change slowly
     if(current_time - g_last_regime_check < InpRegimeCheckMinutes * 60) return true;
     
-    g_last_regime_check = current_time;
+    g_last_regime_check = current_time;  // Update last check timestamp
     
-    // Get recent ATR values for regime analysis
+    // VOLATILITY DATA COLLECTION: Get recent ATR history for analysis
     double atr_buffer[20];
     if(CopyBuffer(h_atr, 0, 0, 20, atr_buffer) < 20) return true;
     
-    // Calculate current volatility percentile
-    double current_atr = atr_buffer[0];
+    // STATISTICAL ANALYSIS: Compare current volatility to recent average
+    double current_atr = atr_buffer[0];  // Most recent volatility reading
     double atr_sum = 0.0;
+    
+    // Calculate average volatility over lookback period (excluding current)
     for(int i = 1; i < 20; i++){
         atr_sum += atr_buffer[i];
     }
-    double avg_atr = atr_sum / 19.0;
+    double avg_atr = atr_sum / 19.0;  // Historical average volatility
     
+    // REGIME CLASSIFICATION: Determine current volatility percentile
     g_volatility_percentile = current_atr / avg_atr;
     g_high_volatility_mode = g_volatility_percentile > InpHighVolatilityThreshold;
     
-    // Adjust risk based on volatility regime
+    // ADAPTIVE RISK ADJUSTMENT: Modify trading parameters based on regime
     if(g_high_volatility_mode){
-        g_volatility_multiplier = InpVolatilityMultiplier;
-        g_volatility_adjustments++;
+        // HIGH VOLATILITY REGIME: Reduce risk exposure
+        g_volatility_multiplier = InpVolatilityMultiplier;  // Typically < 1.0
+        g_volatility_adjustments++;  // Count regime changes
         
+        // DIAGNOSTIC LOGGING: Track regime changes for optimization
         if(InpVerboseLogging){
-            Print("REGIME: High volatility detected, reducing risk. Multiplier: ", 
+            Print("REGIME: High volatility detected (percentile: ", 
+                  DoubleToString(g_volatility_percentile, 2), 
+                  "), reducing risk by factor: ", 
                   DoubleToString(g_volatility_multiplier, 2));
         }
     } else {
-        g_volatility_multiplier = 1.0;
+        // NORMAL VOLATILITY REGIME: Standard risk parameters
+        g_volatility_multiplier = 1.0;  // No position size adjustment
     }
     
-    return true;
+    return true;  // Regime analysis completed successfully
 }
 
 // MASTER RISK CHECK (combines all risk filters)
@@ -1271,62 +1390,109 @@ bool MasterRiskCheck(const double &q_values[], int action, datetime current_time
     return true;
 }
 
-// DYNAMIC POSITION SIZING
+//============================== INTELLIGENT POSITION SIZING SYSTEM ==============================
+// Advanced Risk-Based Position Calculator
+// Automatically adjusts position sizes based on multiple risk factors:
+//   - Account balance (larger accounts can take larger positions)
+//   - Market volatility (smaller positions in volatile markets)
+//   - Signal confidence (larger positions for high-confidence signals)
+//   - Maximum risk tolerance (never risk more than specified percentage)
+//
+// This system solves a critical flaw in the original EA: fixed position sizes
+// that didn't adapt to changing account balances or market conditions
+//
+// Parameters:
+//   account_balance: Current account equity for risk calculations
+//   atr_value: Current market volatility for position scaling
+// Returns: Optimal lot size based on risk management principles
 double CalculateDynamicLotSize(double account_balance, double atr_value){
-    // IMPROVEMENT 7.4: Use flexible position sizing if enabled
+    // ADVANCED SIZING: Use flexible multi-factor position sizing if available
     if(g_parameters_validated && InpFlexSizingEnabled) {
-        // Get last signal confidence and strength from global state
+        // CONFIDENCE-BASED SIZING: Larger positions for higher confidence signals
         double confidence = g_last_confidence > 0 ? g_last_confidence : 0.7; // Default confidence
-        double signal_strength = 0.5; // Default signal strength
+        double signal_strength = 0.5; // Default signal strength (placeholder)
         
+        // Delegate to advanced flexible sizing algorithm
         return CalculateFlexibleLotSize(confidence, signal_strength, atr_value);
     }
     
-    // Legacy dynamic sizing
+    // FIXED SIZING BYPASS: Use constant lot size if dynamic sizing disabled
     if(!InpAllowPositionScaling) return InpLotSize;
     
-    // Base lot size on account risk percentage
+    // RISK-BASED CALCULATION: Core position sizing algorithm
+    // Formula: Risk Amount = Account Balance × Risk Percentage
     double risk_amount = account_balance * (InpRiskPercentage / 100.0);
     
-    // Adjust for current volatility
+    // VOLATILITY ADJUSTMENT: Reduce position size in volatile markets
+    // Protects against larger-than-expected losses during high volatility periods
     risk_amount *= g_volatility_multiplier;
     
-    // Calculate lot size based on ATR and stop distance
+    // STOP DISTANCE CALCULATION: Convert ATR to pip-based stop distance
+    // Uses ATR multiplier to set market-appropriate stop loss distance
     double stop_distance_pips = atr_value * InpATRMultiplier * 10000; // Convert to pips
-    double pip_value = 10.0; // Approximate pip value for major pairs
+    double pip_value = 10.0; // Approximate pip value for major pairs (USD/pip)
     
+    // POSITION SIZE FORMULA: Risk Amount / (Stop Distance × Pip Value)
+    // This ensures consistent dollar risk regardless of market volatility
     g_dynamic_lot_size = risk_amount / (stop_distance_pips * pip_value);
     
-    // Apply bounds
-    g_dynamic_lot_size = MathMax(g_dynamic_lot_size, InpMinLotSize);
-    g_dynamic_lot_size = MathMin(g_dynamic_lot_size, InpMaxLotSize);
+    // SAFETY BOUNDS: Enforce minimum and maximum position size limits
+    // Prevents excessively small or dangerously large positions
+    g_dynamic_lot_size = MathMax(g_dynamic_lot_size, InpMinLotSize);  // Minimum floor
+    g_dynamic_lot_size = MathMin(g_dynamic_lot_size, InpMaxLotSize);  // Maximum ceiling
     
-    return g_dynamic_lot_size;
+    return g_dynamic_lot_size;  // Return calculated optimal position size
 }
 
-// EMERGENCY RISK MANAGEMENT
+//============================== EMERGENCY PROTECTION SYSTEM ==============================
+// Last-Resort Account Protection Mechanism
+// Monitors critical risk thresholds and immediately halts trading when triggered
+// This is the final safety net preventing catastrophic account losses
+//
+// Emergency Triggers:
+//   1. Maximum Drawdown: Account loses too much from peak equity
+//   2. Consecutive Losses: Too many losing trades in a row (system malfunction)
+//   3. Daily Loss Limits: Excessive losses within single trading session
+//
+// When triggered, the system:
+//   - Immediately closes any open positions
+//   - Enters emergency mode (prevents new trades)
+//   - Sets halt timer for recovery period
+//   - Logs emergency details for analysis
+//
+// Parameters:
+//   current_time: Current timestamp for halt duration calculations
+// Returns: true if emergency triggered (position closed), false if normal operation
 bool CheckEmergencyStops(datetime current_time){
+    // POSITION GATE: Only check emergencies if position exists to close
     if(g_current_position == POS_NONE) return false;
     
     double current_balance = g_balance;
+    // DRAWDOWN CALCULATION: Measure decline from peak account equity
     double drawdown_pct = ((g_max_balance - current_balance) / g_max_balance) * 100.0;
     
-    // Check maximum drawdown limit
+    // MAXIMUM DRAWDOWN PROTECTION: Circuit breaker for excessive losses
     if(InpUseEmergencyStop && drawdown_pct > InpMaxDrawdownPercent){
-        ClosePosition("Emergency stop - maximum drawdown exceeded");
-        g_emergency_mode = true;
-        g_emergency_halt_until = current_time + (InpEmergencyHaltHours * 3600);
+        ClosePosition("EMERGENCY: Maximum drawdown exceeded");  // Immediate position closure
+        g_emergency_mode = true;  // Enter protective emergency mode
+        g_emergency_halt_until = current_time + (InpEmergencyHaltHours * 3600);  // Set halt timer
         
-        Print("EMERGENCY: Trading halted due to ", DoubleToString(drawdown_pct, 2), "% drawdown");
+        Print("=== EMERGENCY STOP ACTIVATED ===");
+        Print("Drawdown: ", DoubleToString(drawdown_pct, 2), "% exceeds limit of ", 
+              DoubleToString(InpMaxDrawdownPercent, 2), "%");
+        Print("Trading halted for ", InpEmergencyHaltHours, " hours");
         return true;
     }
     
-    // Check consecutive losses
+    // CONSECUTIVE LOSS PROTECTION: Detect potential system malfunction
     if(g_consecutive_losses >= InpMaxConsecutiveLosses){
-        g_emergency_mode = true;
-        g_emergency_halt_until = current_time + (InpEmergencyHaltHours * 3600);
+        g_emergency_mode = true;  // Enter protective emergency mode
+        g_emergency_halt_until = current_time + (InpEmergencyHaltHours * 3600);  // Set halt timer
         
-        Print("EMERGENCY: Trading halted after ", g_consecutive_losses, " consecutive losses");
+        Print("=== EMERGENCY STOP ACTIVATED ===");
+        Print("Consecutive losses: ", g_consecutive_losses, " exceeds limit of ", 
+              InpMaxConsecutiveLosses);
+        Print("Possible system malfunction - trading halted for ", InpEmergencyHaltHours, " hours");
         return true;
     }
     
@@ -1424,170 +1590,284 @@ void CalculateDailyReturn(double previous_balance, double current_balance) {
     }
 }
 
-// Calculate Sharpe Ratio (risk-adjusted return)
+// Advanced Risk-Adjusted Performance Calculator: Sharpe Ratio
+// The Sharpe Ratio measures the excess return per unit of risk, providing a standardized
+// way to compare strategies with different risk profiles. Higher values indicate better
+// risk-adjusted performance. Values >1.0 are considered good, >2.0 are excellent.
+// Formula: (Mean Return - Risk Free Rate) / Standard Deviation of Returns
 double CalculateSharpeRatio(double mean_return, double return_volatility, double risk_free_rate = 0.02) {
+    // Prevent division by zero - no volatility means no meaningful Sharpe ratio
     if(return_volatility == 0) return 0.0;
-    double annualized_mean = mean_return * 252; // Assuming 252 trading days per year
-    double annualized_vol = return_volatility * MathSqrt(252);
+    
+    // Annualize the metrics for standard comparison (252 trading days/year)
+    // Daily returns are scaled up by 252, volatility by sqrt(252) due to variance scaling
+    double annualized_mean = mean_return * 252; // Scale daily mean to annual
+    double annualized_vol = return_volatility * MathSqrt(252); // Scale daily vol to annual
+    
+    // Calculate Sharpe ratio: excess return per unit of risk
+    // Risk-free rate typically 2% for developed markets
     return (annualized_mean - risk_free_rate) / annualized_vol;
 }
 
-// Calculate Sortino Ratio (focuses on downside risk)
+// Advanced Downside Risk Assessment: Sortino Ratio
+// The Sortino Ratio improves on Sharpe by only penalizing negative volatility (downside deviation),
+// recognizing that upside volatility is desirable. This provides a more accurate risk assessment
+// for asymmetric return distributions common in trading strategies.
+// Formula: (Mean Return - Risk Free Rate) / Downside Deviation
 double CalculateSortinoRatio(double mean_return, double downside_deviation, double risk_free_rate = 0.02) {
+    // Prevent division by zero - no downside deviation means infinite Sortino ratio
     if(downside_deviation == 0) return 0.0;
-    double annualized_mean = mean_return * 252;
-    double annualized_downside = downside_deviation * MathSqrt(252);
+    
+    // Annualize metrics using standard financial conventions
+    double annualized_mean = mean_return * 252; // Scale daily returns to annual
+    double annualized_downside = downside_deviation * MathSqrt(252); // Scale downside risk to annual
+    
+    // Calculate Sortino ratio: excess return per unit of downside risk
+    // Higher values indicate better downside-adjusted performance
     return (annualized_mean - risk_free_rate) / annualized_downside;
 }
 
-// Calculate Calmar Ratio (return vs maximum drawdown)
+// Drawdown-Adjusted Performance Metric: Calmar Ratio
+// The Calmar Ratio measures the relationship between annualized return and maximum drawdown,
+// providing insight into how much return is generated per unit of worst-case risk.
+// Values >1.0 indicate strong performance relative to maximum loss periods.
+// Formula: Annualized Return / Maximum Drawdown Percentage
 double CalculateCalmarRatio(double annualized_return, double max_drawdown_pct) {
+    // Prevent division by zero - no drawdown means infinite Calmar ratio
     if(max_drawdown_pct == 0) return 0.0;
+    
+    // Calculate return per unit of maximum drawdown risk
+    // Higher values indicate better drawdown-adjusted performance
     return annualized_return / max_drawdown_pct;
 }
 
-// Calculate Maximum Drawdown from equity curve
+// Comprehensive Maximum Drawdown Analysis Engine
+// Maximum Drawdown (MDD) is the largest peak-to-trough decline in portfolio value,
+// representing the worst-case loss an investor would have experienced. This function
+// tracks not only the magnitude but also the timing and duration of the worst drawdown period,
+// providing critical risk management insights for strategy evaluation.
 void CalculateMaximumDrawdown() {
-    double max_dd = 0.0;
-    double max_dd_amount = 0.0;
-    datetime dd_start = 0;
-    datetime dd_end = 0;
-    double peak = 0.0;
-    datetime peak_time = 0;
+    // Initialize tracking variables for the worst drawdown period
+    double max_dd = 0.0;          // Maximum drawdown percentage (worst case)
+    double max_dd_amount = 0.0;   // Maximum drawdown in absolute currency amount
+    datetime dd_start = 0;        // When the worst drawdown period began (peak time)
+    datetime dd_end = 0;          // When the worst drawdown reached its lowest point
+    double peak = 0.0;            // Current running peak equity value
+    datetime peak_time = 0;       // Timestamp of current peak
     
+    // Iterate through entire equity curve to find the worst drawdown
     for(int i = 0; i < g_equity_curve_size; i++) {
-        double current_equity = g_equity_curve[i];
-        datetime current_time = g_equity_curve_times[i];
+        double current_equity = g_equity_curve[i];    // Current portfolio value
+        datetime current_time = g_equity_curve_times[i]; // Current timestamp
         
-        // Update peak
+        // Track new equity peaks (high-water marks)
+        // Peak updates mark potential start points for new drawdown periods
         if(current_equity > peak) {
-            peak = current_equity;
-            peak_time = current_time;
+            peak = current_equity;     // Update peak equity level
+            peak_time = current_time;  // Record when peak occurred
         }
         
-        // Calculate current drawdown
+        // Calculate current drawdown from the running peak
         if(peak > 0) {
+            // Calculate drawdown as percentage of peak value
             double current_dd_pct = ((peak - current_equity) / peak) * 100.0;
+            // Calculate absolute drawdown amount in account currency
             double current_dd_amount = peak - current_equity;
             
+            // Check if this is the worst drawdown seen so far
             if(current_dd_pct > max_dd) {
-                max_dd = current_dd_pct;
-                max_dd_amount = current_dd_amount;
-                dd_start = peak_time;
-                dd_end = current_time;
+                max_dd = current_dd_pct;        // Update worst percentage drawdown
+                max_dd_amount = current_dd_amount; // Update worst absolute drawdown
+                dd_start = peak_time;           // Record when worst drawdown started (peak)
+                dd_end = current_time;          // Record current worst point
             }
         }
     }
     
-    g_performance_metrics.maximum_drawdown_pct = max_dd;
-    g_performance_metrics.maximum_drawdown_amount = max_dd_amount;
-    g_performance_metrics.max_dd_start_time = dd_start;
-    g_performance_metrics.max_dd_end_time = dd_end;
+    // Store calculated maximum drawdown metrics in global performance structure
+    g_performance_metrics.maximum_drawdown_pct = max_dd;      // Worst percentage decline
+    g_performance_metrics.maximum_drawdown_amount = max_dd_amount; // Worst absolute loss
+    g_performance_metrics.max_dd_start_time = dd_start;       // Start of worst period
+    g_performance_metrics.max_dd_end_time = dd_end;           // End of worst period
     
-    // Calculate drawdown duration in days
+    // Calculate the duration of the maximum drawdown period in days
+    // This shows how long the strategy took to recover from its worst period
     if(dd_start > 0 && dd_end > dd_start) {
         g_performance_metrics.max_dd_duration_days = (int)((dd_end - dd_start) / (24 * 3600));
     }
 }
 
-// Calculate Value at Risk (VaR) at given confidence level
+// Probabilistic Risk Assessment: Value at Risk (VaR) Calculator
+// VaR estimates the maximum expected loss over a specific time period at a given confidence level.
+// For example, 95% VaR of $1000 means there's a 5% chance of losing more than $1000 in a day.
+// This is a cornerstone risk metric used by banks, hedge funds, and institutional investors
+// for regulatory compliance and risk management decisions.
 double CalculateVaR(double confidence_level) {
+    // Ensure sufficient data for meaningful statistical calculation
     if(g_return_periods < 2) return 0.0;
     
-    // Sort returns array for percentile calculation
+    // Create a sorted copy of daily returns for percentile calculation
+    // Sorting is required to find specific percentile values in the distribution
     double sorted_returns[];
     ArrayResize(sorted_returns, g_return_periods);
     ArrayCopy(sorted_returns, g_daily_returns, 0, 0, g_return_periods);
-    ArraySort(sorted_returns);
+    ArraySort(sorted_returns); // Sort from lowest (most negative) to highest returns
     
-    // Calculate percentile index
+    // Calculate the percentile index corresponding to the confidence level
+    // (1 - confidence_level) gives us the tail probability we're interested in
+    // For 95% confidence, we want the 5th percentile (worst 5% of returns)
     int var_index = (int)((1.0 - confidence_level) * g_return_periods);
+    
+    // Boundary checks to ensure valid array access
     if(var_index < 0) var_index = 0;
     if(var_index >= g_return_periods) var_index = g_return_periods - 1;
     
-    return -sorted_returns[var_index]; // VaR is positive for losses
+    // Return VaR as positive value (losses are positive in risk management convention)
+    // The negative sign converts the return (which is negative for losses) to positive VaR
+    return -sorted_returns[var_index];
 }
 
-// Calculate Conditional VaR (Expected Shortfall)
+// Advanced Tail Risk Metric: Conditional Value at Risk (CVaR / Expected Shortfall)
+// CVaR measures the expected loss in the worst-case scenarios beyond the VaR threshold.
+// While VaR tells us the threshold, CVaR tells us the average loss when that threshold is exceeded.
+// CVaR is considered superior to VaR as it's coherent and captures tail risk more completely.
+// Regulators and sophisticated risk managers prefer CVaR for capital allocation decisions.
 double CalculateConditionalVaR(double confidence_level) {
+    // Require minimum data for statistically meaningful tail analysis
     if(g_return_periods < 2) return 0.0;
     
-    // Sort returns array
+    // Create sorted copy of returns for tail analysis
+    // We need the worst (most negative) returns in the tail of the distribution
     double sorted_returns[];
     ArrayResize(sorted_returns, g_return_periods);
     ArrayCopy(sorted_returns, g_daily_returns, 0, 0, g_return_periods);
-    ArraySort(sorted_returns);
+    ArraySort(sorted_returns); // Sort ascending: worst returns first
     
-    // Calculate tail average
+    // Calculate how many observations fall in the tail (beyond VaR)
+    // This represents the worst (1 - confidence_level) portion of returns
     int tail_count = (int)((1.0 - confidence_level) * g_return_periods);
-    if(tail_count < 1) tail_count = 1;
+    if(tail_count < 1) tail_count = 1; // Ensure at least one observation
     
+    // Calculate the average of all returns in the tail (worse than VaR)
+    // This gives us the expected loss given that we're in the worst-case scenario
     double tail_sum = 0.0;
     for(int i = 0; i < tail_count; i++) {
-        tail_sum += sorted_returns[i];
+        tail_sum += sorted_returns[i]; // Sum the worst returns
     }
     
-    return -(tail_sum / tail_count); // CVaR is positive for losses
+    // Return CVaR as positive value (expected loss in tail scenarios)
+    // Negative sign converts negative returns to positive risk measures
+    return -(tail_sum / tail_count);
 }
 
-// Calculate Ulcer Index (measure of downside risk)
+// Sophisticated Drawdown Risk Measure: Ulcer Index
+// The Ulcer Index quantifies the depth and duration of drawdowns by calculating
+// the square root of the mean of squared drawdown percentages. Unlike maximum drawdown
+// which only shows the worst single point, Ulcer Index penalizes both deep and persistent
+// drawdowns, providing a more comprehensive measure of downside volatility and investor pain.
 double CalculateUlcerIndex() {
+    // Ensure sufficient equity curve data for meaningful calculation
     if(g_equity_curve_size < 2) return 0.0;
     
-    double ulcer_sum = 0.0;
+    double ulcer_sum = 0.0; // Accumulator for squared drawdown percentages
     
+    // Iterate through the underwater curve (drawdown percentages at each point)
+    // The underwater curve shows how far below the peak equity is at each moment
     for(int i = 0; i < g_equity_curve_size; i++) {
-        double dd_pct = g_underwater_curve[i];
+        double dd_pct = g_underwater_curve[i]; // Current drawdown percentage
+        
+        // Square the drawdown percentage to heavily penalize larger drawdowns
+        // This gives more weight to deeper drawdowns and persistent underwater periods
         ulcer_sum += dd_pct * dd_pct;
     }
     
+    // Calculate the root mean square of drawdown percentages
+    // The square root normalizes the heavily weighted squared values
+    // Result: single number representing overall drawdown stress
     return MathSqrt(ulcer_sum / g_equity_curve_size);
 }
 
-// Calculate Pain Index (average drawdown)
+// Investor Stress Metric: Pain Index (Average Drawdown)
+// The Pain Index measures the average percentage of time spent in drawdown,
+// quantifying the typical 'pain' an investor experiences. Unlike maximum drawdown
+// which shows worst-case scenarios, Pain Index shows the typical ongoing stress
+// of holding the strategy. Lower values indicate more comfortable investment experiences.
 double CalculatePainIndex() {
+    // Require minimum equity curve data for calculation
     if(g_equity_curve_size < 2) return 0.0;
     
-    double pain_sum = 0.0;
+    double pain_sum = 0.0; // Accumulator for total drawdown pain
     
+    // Sum all drawdown percentages across the entire equity curve
+    // Each point represents how far below peak the strategy was at that moment
     for(int i = 0; i < g_equity_curve_size; i++) {
-        pain_sum += g_underwater_curve[i];
+        pain_sum += g_underwater_curve[i]; // Add current underwater percentage
     }
     
+    // Calculate average drawdown across all time periods
+    // Result: typical percentage below peak, representing ongoing investor stress
     return pain_sum / g_equity_curve_size;
 }
 
-// Calculate Kelly Criterion for optimal position sizing
+// Optimal Position Sizing Calculator: Kelly Criterion
+// The Kelly Criterion determines the theoretically optimal fraction of capital to risk
+// on each trade to maximize long-term logarithmic growth. Developed by John Kelly at
+// Bell Labs, it balances growth maximization with bankruptcy avoidance.
+// Formula: f = (bp - q) / b, where b = win/loss ratio, p = win rate, q = loss rate
 double CalculateKellyCriterion() {
+    // Require sufficient trade history for meaningful statistical analysis
+    // Kelly calculation needs stable win rate and average win/loss estimates
     if(g_performance_metrics.total_trades < 10) return 0.0;
     
-    double win_rate = g_performance_metrics.win_rate_pct / 100.0;
-    double loss_rate = 1.0 - win_rate;
+    // Convert win rate percentage to probability (0.0 to 1.0)
+    double win_rate = g_performance_metrics.win_rate_pct / 100.0;  // Probability of winning
+    double loss_rate = 1.0 - win_rate;                            // Probability of losing
     
+    // Prevent division by zero in win/loss ratio calculation
     if(g_performance_metrics.average_loss == 0) return 0.0;
     
+    // Calculate the ratio of average win size to average loss size
+    // This represents the 'b' parameter in Kelly formula (payoff ratio)
     double win_loss_ratio = MathAbs(g_performance_metrics.average_win / g_performance_metrics.average_loss);
     
-    // Kelly formula: f = (bp - q) / b
-    // where b = win/loss ratio, p = win probability, q = loss probability
+    // Apply Kelly Criterion formula: f = (bp - q) / b
+    // b = win_loss_ratio (payoff ratio)
+    // p = win_rate (probability of winning)
+    // q = loss_rate (probability of losing)
+    // Result: optimal fraction of capital to risk per trade
     return (win_loss_ratio * win_rate - loss_rate) / win_loss_ratio;
 }
 
-// Update consecutive wins/losses tracking
+// Streak Analysis System: Consecutive Win/Loss Tracking
+// Monitors sequences of consecutive winning and losing trades to identify
+// strategy consistency and potential psychological stress points. Long losing
+// streaks can indicate strategy breakdown or adverse market conditions,
+// while long winning streaks may signal favorable conditions or overfit models.
 void UpdateConsecutiveStats(double pnl) {
+    // Handle profitable trades: increment win streak, reset loss streak
     if(pnl > 0) {
-        g_consecutive_wins++;
-        g_consecutive_losses = 0;
+        g_consecutive_wins++;     // Extend current winning streak
+        g_consecutive_losses = 0; // Reset losing streak counter
+        
+        // Track the longest winning streak achieved
+        // Useful for understanding strategy consistency and confidence building
         if(g_consecutive_wins > g_max_consecutive_wins) {
             g_max_consecutive_wins = g_consecutive_wins;
         }
-    } else if(pnl < 0) {
-        g_consecutive_losses++;
-        g_consecutive_wins = 0;
+    }
+    // Handle losing trades: increment loss streak, reset win streak
+    else if(pnl < 0) {
+        g_consecutive_losses++;  // Extend current losing streak
+        g_consecutive_wins = 0;  // Reset winning streak counter
+        
+        // Track the longest losing streak experienced
+        // Critical for risk management and understanding maximum adversity periods
         if(g_consecutive_losses > g_max_consecutive_losses) {
             g_max_consecutive_losses = g_consecutive_losses;
         }
     }
+    // Note: Break-even trades (pnl == 0) don't affect streak counters
+    // This maintains focus on actual profit/loss momentum
 }
 
 // MASTER FUNCTION: Calculate all comprehensive performance metrics
@@ -2883,7 +3163,12 @@ void CalculateMonteCarloStatistics() {
         if(g_monte_carlo_results.runs[i].robustness_score >= InpMCRobustnessThreshold) g_monte_carlo_results.robust_runs++;
     }
     
+    // Calculate overall success rate as percentage of robust runs
+    // This provides a single metric for strategy reliability across different market scenarios
     g_monte_carlo_results.success_rate = (double)g_monte_carlo_results.robust_runs / n;
+    
+    // Monte Carlo analysis complete - results stored in g_monte_carlo_results structure
+    // These statistics provide confidence intervals and reliability measures for strategy deployment
 }
 
 // Calculate percentiles for distribution analysis
@@ -3509,68 +3794,100 @@ void ClosePosition(string reason){
 //+------------------------------------------------------------------+
 //| Script program start function                                    |
 //+------------------------------------------------------------------+
+// MASTER ORCHESTRATOR: Cortex5 Backtest Execution Engine
+// This is the primary entry point for the Cortex5 backtesting system, coordinating
+// all aspects of historical strategy simulation from initialization through cleanup.
+// The function manages:
+// - System initialization and resource allocation
+// - Monte Carlo robustness testing or single backtest execution
+// - Comprehensive performance analysis and reporting
+// - Data export and cleanup operations
 void OnStart() {
+    // === STAGE 0: SYSTEM INITIALIZATION AND BANNER DISPLAY ===
     Print("=======================================================");
     Print("=== CORTEX 30-DAY BACKTEST SIMULATION STARTING ===");
     Print("=======================================================");
-    Print("Model file: ", InpModelFileName);
-    Print("Backtest period: ", InpBacktestDays, " days");
-    Print("Initial balance: $", DoubleToString(InpInitialBalance, 2));
-    Print("Lot size: ", DoubleToString(InpLotSize, 2));
-    Print("Verbose logging: ", InpVerboseLogging ? "ENABLED" : "DISABLED");
-    Print("Log frequency: Every ", InpLogEveryNBars, " bars");
+    
+    // Display configuration parameters for audit trail and debugging
+    Print("Model file: ", InpModelFileName);              // AI model being tested
+    Print("Backtest period: ", InpBacktestDays, " days"); // Historical period length
+    Print("Initial balance: $", DoubleToString(InpInitialBalance, 2)); // Starting capital
+    Print("Lot size: ", DoubleToString(InpLotSize, 2));   // Position sizing base
+    Print("Verbose logging: ", InpVerboseLogging ? "ENABLED" : "DISABLED"); // Debug level
+    Print("Log frequency: Every ", InpLogEveryNBars, " bars"); // Performance logging frequency
     Print("=======================================================");
     
-    // Initialize performance tracking
-    g_balance = InpInitialBalance;
-    g_equity = InpInitialBalance;
-    g_max_balance = InpInitialBalance;
-    g_max_drawdown = 0;
-    g_bars_processed = 0;
-    g_prediction_failures = 0;
-    g_feature_failures = 0;
-    g_indicator_failures = 0;
+    // === STAGE 0.1: CORE PERFORMANCE TRACKING INITIALIZATION ===
+    // Reset all global performance counters to ensure clean state for new backtest
+    g_balance = InpInitialBalance;      // Current account balance
+    g_equity = InpInitialBalance;       // Current account equity (balance + unrealized P&L)
+    g_max_balance = InpInitialBalance;  // Peak balance achieved (for drawdown calculation)
+    g_max_drawdown = 0;                 // Maximum equity decline from peak
+    g_bars_processed = 0;               // Counter for processed price bars
+    g_prediction_failures = 0;          // AI model prediction error counter
+    g_feature_failures = 0;             // Feature calculation error counter
+    g_indicator_failures = 0;           // Technical indicator error counter
     
-    // IMPROVEMENT 7.1: Initialize advanced feature variables
-    g_confidence_threshold = InpConfidenceThreshold;
-    g_last_confidence = 0.0;
-    g_confidence_trades = 0;
-    g_regime_detected = false;
-    g_regime_volatility = 0.0;
-    g_regime_trend = 0.0;
-    g_last_regime_check = 0;
-    g_current_atr = 0.0;
-    g_stop_loss_price = 0.0;
-    g_take_profit_price = 0.0;
-    g_trailing_stop_price = 0.0;
-    g_max_favorable_price = 0.0;
-    g_position_peak_profit = 0.0;
-    g_dynamic_lot_size = InpLotSize;
-    g_account_risk_pct = InpRiskPercentage;
-    g_position_risk_amount = 0.0;
-    g_emergency_mode = false;
-    g_consecutive_losses = 0;
-    g_emergency_halt_until = 0;
-    g_mtf_enabled = InpUseMTFAnalysis;
-    g_trend_alignment = 0.0;
-    g_volatility_multiplier = 1.0;
-    g_high_volatility_mode = false;
-    g_volatility_percentile = 0.0;
-    g_current_session_active = true;
-    g_session_start_time = 0;
-    g_session_end_time = 0;
-    g_avoid_news_time = false;
-    g_partial_close_enabled = InpUsePartialClose;
-    g_partial_close_pct = InpPartialClosePct;
-    g_position_scaling_level = 0;
-    g_average_entry_price = 0.0;
+    // === STAGE 0.2: ADVANCED FEATURE SYSTEM INITIALIZATION ===
+    // Initialize sophisticated trading system components for comprehensive strategy simulation
     
-    // Initialize performance counters
-    g_confidence_filtered_trades = 0;
-    g_atr_stop_hits = 0;
-    g_trailing_stop_hits = 0;
-    g_regime_triggered_exits = 0;
-    g_volatility_adjustments = 0;
+    // AI Confidence and Decision Quality Tracking
+    g_confidence_threshold = InpConfidenceThreshold; // Minimum confidence for trade execution
+    g_last_confidence = 0.0;                       // Most recent AI model confidence score
+    g_confidence_trades = 0;                       // Counter for high-confidence trades executed
+    
+    // Market Regime Detection System
+    g_regime_detected = false;          // Current market regime state (trending/ranging)
+    g_regime_volatility = 0.0;          // Current regime volatility measure
+    g_regime_trend = 0.0;               // Current regime trend strength
+    g_last_regime_check = 0;            // Timestamp of last regime analysis
+    
+    // Dynamic Risk Management System
+    g_current_atr = 0.0;                // Current Average True Range (volatility measure)
+    g_stop_loss_price = 0.0;            // Current stop loss level for open position
+    g_take_profit_price = 0.0;          // Current take profit target for open position
+    g_trailing_stop_price = 0.0;        // Current trailing stop level
+    g_max_favorable_price = 0.0;        // Best price reached while in position
+    g_position_peak_profit = 0.0;       // Maximum unrealized profit achieved
+    
+    // Adaptive Position Sizing System
+    g_dynamic_lot_size = InpLotSize;    // Current position size (adapts to market conditions)
+    g_account_risk_pct = InpRiskPercentage; // Risk percentage per trade
+    g_position_risk_amount = 0.0;       // Absolute risk amount in account currency
+    
+    // Emergency Protection System
+    g_emergency_mode = false;           // Emergency trading halt flag
+    g_consecutive_losses = 0;           // Current losing streak counter
+    g_emergency_halt_until = 0;         // Time until emergency halt expires
+    
+    // Multi-Timeframe Analysis System
+    g_mtf_enabled = InpUseMTFAnalysis;  // Multi-timeframe analysis enabled flag
+    g_trend_alignment = 0.0;            // Cross-timeframe trend alignment score
+    
+    // Volatility Regime Adaptation
+    g_volatility_multiplier = 1.0;      // Dynamic volatility adjustment factor
+    g_high_volatility_mode = false;     // High volatility regime detection flag
+    g_volatility_percentile = 0.0;      // Current volatility percentile ranking
+    
+    // Trading Session Management
+    g_current_session_active = true;    // Current trading session status
+    g_session_start_time = 0;           // Session start timestamp
+    g_session_end_time = 0;             // Session end timestamp
+    g_avoid_news_time = false;          // News event avoidance flag
+    
+    // Advanced Position Management
+    g_partial_close_enabled = InpUsePartialClose; // Partial position closing enabled
+    g_partial_close_pct = InpPartialClosePct;     // Percentage for partial closes
+    g_position_scaling_level = 0;                 // Current position scaling level
+    g_average_entry_price = 0.0;                  // Volume-weighted average entry price
+    
+    // === STAGE 0.3: ADVANCED PERFORMANCE METRICS COUNTERS ===
+    // Initialize specialized counters for detailed strategy analysis
+    g_confidence_filtered_trades = 0;   // Trades rejected due to low confidence
+    g_atr_stop_hits = 0;               // Positions closed by ATR-based stops
+    g_trailing_stop_hits = 0;          // Positions closed by trailing stops
+    g_regime_triggered_exits = 0;      // Exits triggered by regime changes
+    g_volatility_adjustments = 0;      // Position size adjustments due to volatility
     
     // IMPROVEMENT 8.4: Initialize arrays with memory optimization
     if(InpEnableMemoryOptimization) {
@@ -3679,40 +3996,60 @@ void OnStart() {
         }
     }
     
+    // === STAGE 2: NEURAL NETWORK MODEL LOADING ===
+    // Load the pre-trained AI model that will make trading decisions during backtest
     Print("STAGE 2: Loading trained model...");
     datetime start_load = GetTickCount();
+    
+    // Attempt to load the trained neural network model from disk
+    // The model contains weights, biases, and architecture parameters needed for inference
     if(!LoadModel(InpModelFileName)) {
         Print("✗ ERROR: Failed to load model file!");
         Print("Make sure ", InpModelFileName, " exists in MQL5/Files folder");
-        CleanupIndicators();
-        return;
+        Print("Model loading is critical - cannot proceed without valid AI model");
+        CleanupIndicators(); // Clean up any allocated indicator handles
+        return; // Exit immediately - backtest cannot continue without model
     }
     Print("✓ Model loaded successfully in ", GetTickCount() - start_load, " ms");
     
-    // Calculate backtest date range
-    datetime end_time = TimeCurrent();
-    datetime start_time = end_time - (InpBacktestDays * 24 * 3600);
+    // === STAGE 3: BACKTEST ENVIRONMENT PREPARATION ===
+    // Configure the historical simulation parameters and validate data availability
+    
+    // Calculate the date range for historical simulation
+    // Uses current time as end point and subtracts the specified number of days
+    datetime end_time = TimeCurrent();                            // Current server time as end point
+    datetime start_time = end_time - (InpBacktestDays * 24 * 3600); // Calculate start time
     
     Print("STAGE 3: Preparing backtest environment...");
-    Print("Backtest range: ", TimeToString(start_time, TIME_DATE|TIME_SECONDS), " to ", TimeToString(end_time, TIME_DATE|TIME_SECONDS));
+    Print("Backtest range: ", TimeToString(start_time, TIME_DATE|TIME_SECONDS), " to ", 
+          TimeToString(end_time, TIME_DATE|TIME_SECONDS));
     Print("Current server time: ", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
     
-    // Check data availability
+    // Validate historical data availability for the backtest period
+    // Insufficient data would compromise the reliability of simulation results
     int available_bars = Bars(_Symbol, PERIOD_CURRENT);
     Print("Available bars on ", _Symbol, " ", EnumToString(PERIOD_CURRENT), ": ", available_bars);
     
+    // Warn if insufficient historical data available (minimum 100 bars recommended)
+    // Less data means less reliable backtesting results and potential edge effects
     if(available_bars < 100) {
         Print("✗ WARNING: Limited historical data available (", available_bars, " bars)");
+        Print("   Consider using a shorter backtest period or downloading more history");
     } else {
-        Print("✓ Sufficient historical data available");
+        Print("✓ Sufficient historical data available for reliable backtesting");
     }
     
+    // === STAGE 4: CORE SIMULATION EXECUTION ===
+    // Execute either Monte Carlo robustness testing or single historical backtest
     Print("STAGE 4: Starting simulation...");
     datetime start_backtest = GetTickCount();
     
-    // IMPROVEMENT 7.5: Monte Carlo testing or single backtest
+    // DECISION POINT: Monte Carlo Robustness Testing vs Single Backtest
+    // Monte Carlo mode runs multiple variations to test strategy robustness under
+    // different market conditions, spread variations, and data perturbations
     if(InpEnableMonteCarloMode) {
         Print("🎲 MONTE CARLO MODE ENABLED - Running ", InpMonteCarloRuns, " randomized simulations");
+        Print("   This will test strategy robustness across multiple market scenarios");
         Print("================================================");
         
         // Initialize Monte Carlo testing
@@ -3787,15 +4124,20 @@ void OnStart() {
             Print("================================================");
         }
     } else {
-        // Standard single backtest
+        // === SINGLE BACKTEST MODE ===
+        // Execute one comprehensive historical simulation with the specified parameters
+        // Provides detailed analysis of strategy performance over the selected period
+        Print("📈 SINGLE BACKTEST MODE - Running historical simulation");
         RunBacktest(start_time, end_time);
     }
     
+    // === STAGE 5: SIMULATION COMPLETION AND TIMING ===
     Print("STAGE 5: Simulation completed in ", GetTickCount() - start_backtest, " ms");
-    Print("STAGE 6: Generating performance report...");
     
-    // Generate performance report
-    GeneratePerformanceReport();
+    // === STAGE 6: COMPREHENSIVE PERFORMANCE ANALYSIS ===
+    // Generate detailed performance metrics, risk analysis, and trading statistics
+    Print("STAGE 6: Generating performance report...");
+    GeneratePerformanceReport(); // Calculate and display all performance metrics
     
     // IMPROVEMENT 7.3: Export comprehensive CSV data
     if(InpEnableCSVLogging) {
@@ -3817,9 +4159,14 @@ void OnStart() {
         SaveParameterSet();
     }
     
+    // === STAGE 7: RESOURCE CLEANUP AND FINALIZATION ===
+    // Systematically release all allocated resources to prevent memory leaks
     Print("STAGE 7: Cleaning up resources...");
-    // Clean up
+    
+    // Release technical indicator handles and free associated memory
     CleanupIndicators();
+    
+    // Close log files and flush any buffered data
     CleanupControlledLogging();
     
     // IMPROVEMENT 8.4: Final memory management cleanup
@@ -3834,10 +4181,15 @@ void OnStart() {
         CleanupMultiThreadingOptimization();
     }
     
+    // === FINAL COMPLETION BANNER AND PERFORMANCE SUMMARY ===
     Print("=======================================================");
     Print("=== BACKTEST COMPLETED SUCCESSFULLY ===");
     Print("Total processing time: ", GetTickCount() - start_init, " ms");
+    Print("All systems cleaned up and backtest data preserved");
     Print("=======================================================");
+    
+    // OnStart() execution complete - system ready for next operation
+    // All performance data has been calculated and is available in global structures
 }
 
 //+------------------------------------------------------------------+

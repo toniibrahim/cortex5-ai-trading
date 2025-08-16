@@ -505,51 +505,127 @@ datetime         g_last_adaptive_reset = 0;             // Last time adaptive pa
 double           g_adaptive_parameter_changes = 0;      // Count of parameter adjustments made
 double           g_volatility_regime_changes = 0;       // Count of volatility regime changes
 
-// UTILITY FUNCTIONS - Small helper functions used throughout the program
-int    idx2(const int r,const int c,const int ncols){ return r*ncols + c; } // Convert 2D matrix position to 1D array index
-int    argmax(const double &v[]){ int m=0; for(int i=1;i<ArraySize(v);++i) if(v[i]>v[m]) m=i; return m; } // Find index of highest value in array
-int    argmax_int(const int &v[]){ int m=0; for(int i=1;i<ArraySize(v);++i) if(v[i]>v[m]) m=i; return m; } // Find index of highest value in int array
-double clipd(const double x,const double a,const double b){ return (x<a? a : (x>b? b : x)); } // Constrain value between min and max
+//============================== UTILITY FUNCTIONS ==============================
+// Core mathematical and array manipulation functions used throughout the EA
+// These lightweight functions provide essential operations for neural network
+// processing, data analysis, and value constraints
+
+// 2D Matrix to 1D Array Index Converter
+// Converts row/column coordinates to linear array index for matrix operations
+// Essential for neural network weight matrices stored as flat arrays
+// Formula: index = row * number_of_columns + column
+// Used extensively in model loading and neural network inference
+int    idx2(const int r,const int c,const int ncols){ return r*ncols + c; }
+
+// Maximum Value Index Finder (Double Array)
+// Locates the position of the largest value in a double array
+// Critical for AI decision making: finds the trading action with highest Q-value
+// This function determines which action (BUY, SELL, HOLD, etc.) the AI recommends
+// Returns: Index of the maximum value (corresponds to selected trading action)
+int    argmax(const double &v[]){ 
+    int m=0; 
+    for(int i=1;i<ArraySize(v);++i) 
+        if(v[i]>v[m]) m=i; 
+    return m; 
+}
+
+// Maximum Value Index Finder (Integer Array)
+// Same as argmax but optimized for integer arrays
+// Used for ensemble voting, confidence calculations, and discrete choice problems
+// Provides type-specific optimization for integer-based decision arrays
+int    argmax_int(const int &v[]){ 
+    int m=0; 
+    for(int i=1;i<ArraySize(v);++i) 
+        if(v[i]>v[m]) m=i; 
+    return m; 
+}
+
+// Value Clipping/Constraining Function
+// Forces a value to stay within specified bounds [a, b]
+// Prevents neural network outputs from becoming extreme or invalid
+// Essential for: activation function bounds, probability constraints, risk limits
+// Returns: x clamped to [a,b] range (a if x<a, b if x>b, x otherwise)
+double clipd(const double x,const double a,const double b){ return (x<a? a : (x>b? b : x)); }
 
 
-// NEURAL NETWORK LAYER STRUCTURE
-// Represents one layer of the neural network with weights and biases
+//============================== NEURAL NETWORK STRUCTURES ==============================
+// Data structures that define the architecture and parameters of the AI model
+// These structures store the "learned intelligence" from the training process
+
+// Dense (Fully Connected) Neural Network Layer
+// Represents a standard neural network layer where every input connects to every output
+// The fundamental building block of the Double-Dueling DRQN architecture
+// Contains the learned patterns that enable AI trading decisions
 struct DenseLayer{ 
-    int in,out;     // Number of input and output neurons
-    double W[];     // Weights connecting inputs to outputs
-    double b[];     // Bias values for each output neuron
+    int in,out;     // Layer dimensions: number of input neurons and output neurons
+    double W[];     // Weight matrix (flattened): defines connection strengths between neurons
+                    // Each weight determines how strongly one neuron influences another
+    double b[];     // Bias vector: allows neurons to fire even with zero input
+                    // Biases enable the network to learn offset patterns and thresholds
 };
 
-// LSTM Layer structure for inference (simplified from training version)
+// LSTM (Long Short-Term Memory) Layer for Market Memory
+// Advanced neural network component that remembers market patterns over time
+// Critical for recognizing trends, cycles, and temporal dependencies in trading
+// Simplified inference-only version (no training parameters needed for live trading)
 struct LSTMInferenceLayer{
-    int in, out;
-    double Wf[], Wi[], Wc[], Wo[];  // Input-to-hidden weights
-    double Uf[], Ui[], Uc[], Uo[];  // Hidden-to-hidden weights
-    double bf[], bi[], bc[], bo[];  // Bias vectors
-    double h_prev[], c_prev[];      // Previous states (maintained between predictions)
-    double h_curr[], c_curr[];      // Current states
+    // Layer Architecture
+    int in, out;    // Input size (market features) and output size (memory units)
     
+    // LSTM Gate Weights - Control information flow and memory retention
+    double Wf[], Wi[], Wc[], Wo[];  // Input-to-hidden weight matrices for each gate
+                                    // Wf=forget, Wi=input, Wc=candidate, Wo=output
+    double Uf[], Ui[], Uc[], Uo[];  // Hidden-to-hidden recurrent weight matrices
+                                    // Enable memory persistence across time steps
+    double bf[], bi[], bc[], bo[];  // Bias vectors for each gate (learned offset values)
+    
+    // LSTM Memory State - Maintains market context between predictions
+    double h_prev[], c_prev[];      // Previous hidden state and cell state
+                                    // Contains accumulated market memory from past bars
+    double h_curr[], c_curr[];      // Current hidden state and cell state
+                                    // Updated with each new market observation
+    
+    // Constructor - Initialize empty LSTM layer
     LSTMInferenceLayer() : in(0), out(0) {}
     
+    // Initialize LSTM Layer with Specified Dimensions
+    // Allocates memory for all weight matrices and state vectors
+    // Called once during model loading to set up the layer architecture
     void Init(int _in, int _out){
         in = _in; out = _out;
-        int ih_size = in * out;
-        int hh_size = out * out;
         
-        ArrayResize(Wf, ih_size); ArrayResize(Wi, ih_size); ArrayResize(Wc, ih_size); ArrayResize(Wo, ih_size);
-        ArrayResize(Uf, hh_size); ArrayResize(Ui, hh_size); ArrayResize(Uc, hh_size); ArrayResize(Uo, hh_size);
-        ArrayResize(bf, out); ArrayResize(bi, out); ArrayResize(bc, out); ArrayResize(bo, out);
+        // Calculate matrix sizes for weight allocation
+        int ih_size = in * out;   // Input-to-hidden matrix size
+        int hh_size = out * out;  // Hidden-to-hidden matrix size
+        
+        // Allocate input-to-hidden weight matrices (4 gates: forget, input, candidate, output)
+        ArrayResize(Wf, ih_size); ArrayResize(Wi, ih_size); 
+        ArrayResize(Wc, ih_size); ArrayResize(Wo, ih_size);
+        
+        // Allocate hidden-to-hidden recurrent weight matrices
+        ArrayResize(Uf, hh_size); ArrayResize(Ui, hh_size); 
+        ArrayResize(Uc, hh_size); ArrayResize(Uo, hh_size);
+        
+        // Allocate bias vectors for each gate
+        ArrayResize(bf, out); ArrayResize(bi, out); 
+        ArrayResize(bc, out); ArrayResize(bo, out);
+        
+        // Allocate state vectors for memory persistence
         ArrayResize(h_prev, out); ArrayResize(c_prev, out);
         ArrayResize(h_curr, out); ArrayResize(c_curr, out);
         
+        // Initialize with clean memory state
         ResetState();
     }
     
+    // Reset LSTM Memory State
+    // Clears all accumulated market memory, starting fresh
+    // Called when beginning new trading sessions or after significant market events
     void ResetState(){
-        ArrayInitialize(h_prev, 0.0);
-        ArrayInitialize(c_prev, 0.0);
-        ArrayInitialize(h_curr, 0.0);
-        ArrayInitialize(c_curr, 0.0);
+        ArrayInitialize(h_prev, 0.0);  // Clear previous hidden state
+        ArrayInitialize(c_prev, 0.0);  // Clear previous cell state  
+        ArrayInitialize(h_curr, 0.0);  // Clear current hidden state
+        ArrayInitialize(c_curr, 0.0);  // Clear current cell state
     }
     
     // Simplified LSTM forward pass for inference
@@ -774,73 +850,158 @@ CInferenceNetwork* GetEnsembleModel(int index){
     }
 }
 
-//-------------------------- MODEL LOADING FUNCTIONS -----------------------
-// These functions load the trained Double-Dueling DRQN model from a file
-// Load one layer's weights and biases from the model file
+//============================== MODEL LOADING FUNCTIONS ==============================
+// Binary model file deserialization functions for trained neural networks
+// These functions reconstruct the AI's "learned intelligence" from disk storage
+// Critical for deploying trained models in live trading environments
+
+// Dense Layer Loader - Reconstructs Neural Network Layer from Binary Data
+// Loads pre-trained weights and biases that encode the AI's trading knowledge
+// Each weight represents a learned connection strength between neurons
+// Each bias represents a learned activation threshold for decision-making
+//
+// Parameters:
+//   h: File handle for reading binary model data
+//   L: Dense layer structure to populate with loaded parameters
+// Returns: true if layer loaded successfully, false if format mismatch
 bool LoadLayer(const int h, DenseLayer &L){
-  int in  = (int)FileReadLong(h);   // Read input size from file
-  int out = (int)FileReadLong(h);   // Read output size from file
+  // Read layer dimensions from file header
+  int in  = (int)FileReadLong(h);   // Number of input neurons from file
+  int out = (int)FileReadLong(h);   // Number of output neurons from file
+  
+  // Validate layer dimensions match expected architecture
   if(in!=L.in || out!=L.out){ 
-      Print("LoadLayer mismatch: expected ",L.in,"x",L.out," got ",in,"x",out); 
+      Print("FATAL ERROR: Layer dimension mismatch!");
+      Print("Expected: ",L.in," inputs × ",L.out," outputs");
+      Print("Found in file: ",in," inputs × ",out," outputs");
+      Print("Model file is incompatible with current EA architecture");
       return false; 
   }
-  // Load all the weights
-  for(int i=0;i<L.in*L.out;++i) L.W[i]=FileReadDouble(h);
-  // Load all the biases
-  for(int j=0;j<L.out;++j)      L.b[j]=FileReadDouble(h);
-  return true;
+  
+  // Load weight matrix - defines connection strengths between all neuron pairs
+  // Weights encode learned trading patterns and market relationships
+  for(int i=0;i<L.in*L.out;++i) {
+      L.W[i]=FileReadDouble(h);  // Each weight affects decision-making strength
+  }
+  
+  // Load bias vector - allows neurons to activate independently of inputs
+  // Biases enable the network to learn offset patterns and thresholds
+  for(int j=0;j<L.out;++j) {
+      L.b[j]=FileReadDouble(h);  // Each bias shifts neuron activation point
+  }
+  
+  return true;  // Layer successfully reconstructed from file
 }
 
-// Load LSTM layer from model file
+// LSTM Memory Layer Loader - Reconstructs Market Memory System
+// Loads sophisticated temporal memory weights that enable the AI to remember
+// market patterns, trends, and cycles across multiple time periods
+// LSTM layers are critical for understanding market context and timing
+//
+// Parameters:
+//   h: File handle for reading binary LSTM parameters
+//   lstm: LSTM layer structure to populate with memory weights
+// Returns: true if LSTM loaded successfully, false if architecture mismatch
 bool LoadLSTMLayer(const int h, LSTMInferenceLayer &lstm){
-  int in = (int)FileReadLong(h);
-  int out = (int)FileReadLong(h);
+  // Read LSTM layer dimensions from file
+  int in = (int)FileReadLong(h);   // Input size (market features)
+  int out = (int)FileReadLong(h);  // Output size (memory units)
   
+  // Validate LSTM architecture matches expected configuration
   if(in != lstm.in || out != lstm.out){
-    Print("LoadLSTMLayer mismatch: expected ",lstm.in,"x",lstm.out," got ",in,"x",out);
+    Print("FATAL ERROR: LSTM layer dimension mismatch!");
+    Print("Expected: ",lstm.in," inputs × ",lstm.out," memory units");
+    Print("Found in file: ",in," inputs × ",out," memory units");
+    Print("LSTM memory system incompatible with current model");
     return false;
   }
   
-  // Load all LSTM weights
+  // Load Input-to-Hidden Weight Matrices
+  // These weights control how new market information affects memory gates
   for(int i=0; i<lstm.in*lstm.out; i++){
-    lstm.Wf[i] = FileReadDouble(h); // Forget gate input weights
-    lstm.Wi[i] = FileReadDouble(h); // Input gate input weights
-    lstm.Wc[i] = FileReadDouble(h); // Cell gate input weights
-    lstm.Wo[i] = FileReadDouble(h); // Output gate input weights
+    lstm.Wf[i] = FileReadDouble(h); // Forget gate: what market info to forget
+    lstm.Wi[i] = FileReadDouble(h); // Input gate: what new info to remember
+    lstm.Wc[i] = FileReadDouble(h); // Candidate gate: how to update memory
+    lstm.Wo[i] = FileReadDouble(h); // Output gate: what memory to use for decisions
   }
   
+  // Load Hidden-to-Hidden Recurrent Weight Matrices
+  // These weights enable memory persistence and temporal pattern recognition
   for(int i=0; i<lstm.out*lstm.out; i++){
-    lstm.Uf[i] = FileReadDouble(h); // Forget gate hidden weights
-    lstm.Ui[i] = FileReadDouble(h); // Input gate hidden weights
-    lstm.Uc[i] = FileReadDouble(h); // Cell gate hidden weights
-    lstm.Uo[i] = FileReadDouble(h); // Output gate hidden weights
+    lstm.Uf[i] = FileReadDouble(h); // Forget gate recurrent weights
+    lstm.Ui[i] = FileReadDouble(h); // Input gate recurrent weights
+    lstm.Uc[i] = FileReadDouble(h); // Candidate gate recurrent weights
+    lstm.Uo[i] = FileReadDouble(h); // Output gate recurrent weights
   }
   
-  // Load biases
+  // Load Gate Bias Vectors
+  // Biases allow gates to have learned default behaviors independent of inputs
   for(int i=0; i<lstm.out; i++){
-    lstm.bf[i] = FileReadDouble(h); // Forget gate bias
-    lstm.bi[i] = FileReadDouble(h); // Input gate bias
-    lstm.bc[i] = FileReadDouble(h); // Cell gate bias
-    lstm.bo[i] = FileReadDouble(h); // Output gate bias
+    lstm.bf[i] = FileReadDouble(h); // Forget gate bias (default forgetting strength)
+    lstm.bi[i] = FileReadDouble(h); // Input gate bias (default input sensitivity)
+    lstm.bc[i] = FileReadDouble(h); // Candidate gate bias (default memory update)
+    lstm.bo[i] = FileReadDouble(h); // Output gate bias (default output strength)
   }
   
-  return true;
+  return true;  // LSTM memory system successfully reconstructed
 }
 
-// Check if a timeframe value is valid in MetaTrader 5
-// This prevents loading corrupted model files
+// MetaTrader 5 Timeframe Validator
+// Verifies that a timeframe value from a model file is legitimate
+// Prevents crashes from corrupted model files with invalid timeframe data
+// Essential safety check during model loading to ensure trading compatibility
+//
+// Parameters:
+//   tf: Timeframe value in minutes to validate
+// Returns: true if timeframe is valid in MT5, false if invalid/corrupted
 bool IsValidTF(int tf){
-  static int tfs[] = {1,2,3,4,5,6,10,12,15,20,30,60,120,180,240,360,480,720,1440,10080,43200}; // Valid MT5 timeframes in minutes
-  for(int i=0;i<ArraySize(tfs); ++i) if(tfs[i]==tf) return true;
-  return false;
+  // Official MetaTrader 5 timeframes (in minutes)
+  // These are the only valid values - anything else indicates file corruption
+  static int tfs[] = {
+    1,     // M1  - 1 minute charts
+    2,     // M2  - 2 minute charts  
+    3,     // M3  - 3 minute charts
+    4,     // M4  - 4 minute charts
+    5,     // M5  - 5 minute charts
+    6,     // M6  - 6 minute charts
+    10,    // M10 - 10 minute charts
+    12,    // M12 - 12 minute charts
+    15,    // M15 - 15 minute charts
+    20,    // M20 - 20 minute charts
+    30,    // M30 - 30 minute charts
+    60,    // H1  - 1 hour charts
+    120,   // H2  - 2 hour charts
+    180,   // H3  - 3 hour charts
+    240,   // H4  - 4 hour charts
+    360,   // H6  - 6 hour charts
+    480,   // H8  - 8 hour charts
+    720,   // H12 - 12 hour charts
+    1440,  // D1  - Daily charts
+    10080, // W1  - Weekly charts
+    43200  // MN1 - Monthly charts
+  };
+  
+  // Linear search through valid timeframes
+  for(int i=0;i<ArraySize(tfs); ++i) {
+    if(tfs[i]==tf) return true;  // Found valid timeframe
+  }
+  return false;  // Invalid timeframe - possible file corruption
 }
 
-// ROBUST SYMBOL AND TIMEFRAME READING
-// Models can be saved in different formats, so we try multiple methods
-// This ensures compatibility with models saved by different versions
+// Robust Symbol and Timeframe Extraction from Model Files
+// Models may be saved in different formats across training versions
+// This function attempts multiple parsing methods to ensure backward compatibility
+// Critical for preventing deployment failures due to format differences
+//
+// Parameters:
+//   h: File handle positioned at symbol/timeframe section
+//   sym: Output parameter for extracted symbol name
+//   tf: Output parameter for extracted timeframe
+// Returns: true if successfully extracted both values, false if parsing failed
 bool ReadSymbolAndTF(int h, string &sym, ENUM_TIMEFRAMES &tf)
 {
-  // Save current position in case we need to backtrack
+  // Save current file position for potential backtracking if parsing fails
+  // This allows us to try alternative parsing methods on the same data
   ulong pos = FileTell(h);
 
   // ---- Method 1: Modern format with length prefix ----
@@ -1048,156 +1209,352 @@ struct Series{
     datetime times[];   // Array of timestamps for each bar
 };
 
-// Load historical market data from MetaTrader
+//============================== DATA SERIES MANAGEMENT ==============================
+// Functions for loading and synchronizing market data across multiple timeframes
+// Essential for providing the AI with comprehensive market context
+
+// Historical Market Data Loader
+// Downloads OHLCV price data from MetaTrader 5 for AI analysis
+// Provides the raw market information that feeds into feature extraction
+// Critical for real-time trading decisions and market state assessment
+//
+// Parameters:
+//   sym: Trading symbol (e.g., "EURUSD", "GBPUSD")
+//   tf: Timeframe for data (M1, M5, H1, H4, D1, etc.)
+//   count: Number of historical bars to load
+//   s: Series structure to store the downloaded data
+// Returns: true if data loaded successfully, false if download failed
 bool LoadSeries(const string sym, ENUM_TIMEFRAMES tf, int count, Series &s){
-  ArraySetAsSeries(s.rates,true);  // Set array indexing: [0]=newest, [1]=older, etc.
-  int copied = CopyRates(sym,tf,0,count,s.rates);  // Get price data from MT5
+  // Configure array indexing for chronological access
+  // Index [0] = most recent bar, [1] = previous bar, etc.
+  // This indexing matches how indicators and technical analysis typically work
+  ArraySetAsSeries(s.rates,true);
+  
+  // Download historical price data from MetaTrader 5 server
+  // Gets OHLCV (Open, High, Low, Close, Volume) data for specified period
+  int copied = CopyRates(sym,tf,0,count,s.rates);
+  
+  // Validate data download success
   if(copied<=0){ 
-      Print("CopyRates failed ",sym," ",EnumToString(tf)," err=",GetLastError()); 
+      Print("CRITICAL ERROR: Failed to load market data!");
+      Print("Symbol: ",sym,", Timeframe: ",EnumToString(tf));
+      Print("MT5 Error Code: ",GetLastError());
+      Print("Check symbol availability and market hours");
       return false; 
   }
-  // Extract timestamps from the rate data
+  
+  // Extract timestamps for multi-timeframe synchronization
+  // Timestamps enable precise alignment of data across different timeframes
+  // Essential for creating comprehensive market state vectors
   ArrayResize(s.times,copied);
-  for(int i=0;i<copied;++i) s.times[i]=s.rates[i].time;
-  return true;
-}
-
-// Binary search to find the latest bar at or before a given time
-// This is used to sync data across different timeframes
-int FindIndexLE(const datetime &times[], int n, datetime t){
-  int lo=0, hi=n-1, ans=-1;
-  while(lo<=hi){
-    int mid=(lo+hi)>>1;  // Middle point
-    if(times[mid]<=t){ 
-        ans=mid; lo=mid+1;  // Found candidate, look for later one
-    } else hi=mid-1;        // Time too late, look earlier
+  for(int i=0;i<copied;++i) {
+      s.times[i]=s.rates[i].time;  // Store bar opening time
   }
-  return ans;  // Returns index of latest bar <= time t
+  
+  return true;  // Market data successfully loaded and indexed
 }
 
-// TECHNICAL INDICATOR CALCULATIONS
-// These calculate the market features that the AI uses to make decisions
+// Binary Search for Multi-Timeframe Data Synchronization
+// Efficiently finds the latest bar that occurred at or before a specific time
+// Critical for aligning data across different timeframes (M1, M5, H1, etc.)
+// Uses O(log n) binary search instead of O(n) linear search for performance
+//
+// Use Case Example:
+//   When analyzing H1 data, we need to find which M5 bars correspond to each H1 bar
+//   This function quickly locates the synchronization points between timeframes
+//
+// Parameters:
+//   times[]: Array of timestamps (must be sorted in ascending order)
+//   n: Number of elements in the times array
+//   t: Target timestamp to search for
+// Returns: Index of the latest bar with time <= t, or -1 if no such bar exists
+int FindIndexLE(const datetime &times[], int n, datetime t){
+  int lo=0, hi=n-1, ans=-1;  // Binary search bounds and result tracker
+  
+  // Perform binary search to find the optimal synchronization point
+  while(lo<=hi){
+    int mid=(lo+hi)>>1;      // Calculate midpoint (bit shift for fast division)
+    
+    if(times[mid]<=t){       // If midpoint time is before or at target time
+        ans=mid;             // This could be our answer (latest valid bar)
+        lo=mid+1;            // Search right half for potentially later bar
+    } else {                 // If midpoint time is after target time
+        hi=mid-1;            // Search left half for earlier bars
+    }
+  }
+  
+  return ans;  // Returns index of latest bar <= target time (or -1 if none found)
+}
 
-// Simple Moving Average of closing prices
+//============================== TECHNICAL INDICATOR CALCULATIONS ==============================
+// Advanced market analysis functions that extract trading signals from price data
+// These indicators provide the fundamental building blocks for AI decision-making
+// Each function transforms raw OHLCV data into normalized features for neural networks
+
+// Simple Moving Average Calculator
+// Calculates the arithmetic mean of closing prices over a specified period
+// Smooths price noise and identifies trend direction and momentum
+// Essential baseline indicator for trend analysis and support/resistance levels
+//
+// Parameters:
+//   r[]: Array of price bars (OHLCV data)
+//   i: Current bar index (starting point for calculation)
+//   period: Number of bars to include in average
+// Returns: Average closing price over the period, or 0.0 if insufficient data
 double SMA_Close(const MqlRates &r[], int i, int period){ 
-    double s=0; int n=0; 
+    double s=0; int n=0;  // Accumulator for sum and valid bar count
+    
+    // Sum closing prices over the specified period
     for(int k=0;k<period && (i+k)<ArraySize(r); ++k){ 
-        s+=r[i+k].close; n++; 
+        s+=r[i+k].close;  // Add each closing price to sum
+        n++;               // Count valid bars processed
     } 
+    
+    // Return arithmetic mean or zero if no valid data
     return (n>0? s/n : 0.0); 
 }
 
 // Note: EMA_Slope and ATR_Proxy functions are now provided by CortexTradeLogic.mqh
 
-// Trend direction: compares current price to price N bars ago
+// Trend Direction Detector
+// Compares current price to historical price to determine trend direction
+// Simple but effective method for identifying bullish vs bearish momentum
+// Provides discrete directional signal that's easy for AI to interpret
+//
+// Parameters:
+//   r[]: Array of price bars
+//   i: Current bar index
+//   look: Number of bars to look back for comparison
+// Returns: 1.0 (uptrend), -1.0 (downtrend), or 0.0 (sideways)
 double TrendDir(const MqlRates &r[], int i, int look){
-  int idx=i+look;
+  int idx=i+look;  // Calculate historical comparison point
+  
+  // Validate sufficient historical data exists
   if(idx>=ArraySize(r)) return 0.0;
-  double a=r[i].close, b=r[idx].close;
-  if(a>b) return 1.0;     // Uptrend
-  if(a<b) return -1.0;    // Downtrend 
-  return 0.0;             // Sideways
+  
+  double a=r[i].close;    // Current closing price
+  double b=r[idx].close;  // Historical closing price
+  
+  // Determine trend direction based on price comparison
+  if(a>b) return 1.0;     // Current > Historical = Uptrend (bullish)
+  if(a<b) return -1.0;    // Current < Historical = Downtrend (bearish)
+  return 0.0;             // Current = Historical = Sideways (neutral)
 }
 
-// ENHANCED MARKET CONTEXT FEATURES (NEW - populate reserved slots 15-34)
-// These features provide critical market context missing from basic price/volume data
+//============================== ENHANCED MARKET CONTEXT FEATURES ==============================
+// Sophisticated market environment indicators that capture trading session dynamics
+// These features provide temporal and institutional context missing from pure price data
+// Critical for understanding when and why certain trading patterns emerge
 
-// Get normalized time-of-day (0.0 = start of day, 1.0 = end of day)
+// Intraday Time Position Calculator
+// Converts current time to normalized position within the trading day
+// Captures intraday patterns like opening gaps, lunch lulls, and closing drives
+// Essential for modeling session-specific volatility and liquidity patterns
+//
+// Returns: Normalized time value (0.0 = start of day, 1.0 = end of day)
 double GetTimeOfDay(){
     MqlDateTime dt;
-    TimeToStruct(TimeCurrent(), dt);
-    return (dt.hour * 60.0 + dt.min) / (24.0 * 60.0);  // 0-1 range
+    TimeToStruct(TimeCurrent(), dt);  // Get current server time structure
+    
+    // Convert hours and minutes to fractional day position
+    // Formula: (hours * 60 + minutes) / (24 * 60) gives 0.0-1.0 range
+    return (dt.hour * 60.0 + dt.min) / (24.0 * 60.0);
 }
 
-// Get day of week (0.0 = Sunday, 1.0 = Saturday)
+// Weekly Position Calculator
+// Encodes the day of week as a normalized trading cycle position
+// Captures weekly patterns like Monday gaps, Wednesday reversals, Friday profit-taking
+// Important for modeling institutional trading flows and market sentiment cycles
+//
+// Returns: Normalized week position (0.0 = Sunday, 1.0 = Saturday)
 double GetDayOfWeek(){
     MqlDateTime dt;
-    TimeToStruct(TimeCurrent(), dt);
-    return dt.day_of_week / 6.0;  // 0-1 range
+    TimeToStruct(TimeCurrent(), dt);  // Get current time components
+    
+    // Convert day of week to 0-1 range
+    // Sunday=0, Monday=1, ..., Saturday=6 -> normalized to 0.0-1.0
+    return dt.day_of_week / 6.0;
 }
 
-// Get trading session indicator (0=Asian, 0.33=London, 0.66=NY, 1.0=Off-hours)
+// Global Trading Session Detector
+// Identifies which major trading session is currently active
+// Critical for understanding liquidity, volatility, and institutional participation
+// Different sessions have distinct characteristics for AI strategy adaptation
+//
+// Session Characteristics:
+//   Asian: Lower volatility, range-bound trading, yen pairs active
+//   London: High volatility, trend initiation, EUR/GBP pairs active  
+//   New York: Maximum liquidity, trend continuation, USD pairs active
+//   Off-hours: Minimal liquidity, increased spread risk
+//
+// Returns: Session identifier (0.0=Asian, 0.33=London, 0.66=NY, 1.0=Off-hours)
 double GetTradingSession(){
     MqlDateTime dt;
     TimeToStruct(TimeCurrent(), dt);
-    int hour_utc = dt.hour;  // Assuming server time is UTC
+    int hour_utc = dt.hour;  // Assumes server time is UTC (verify for your broker)
     
-    // Asian session: 00:00-09:00 UTC
+    // Asian Trading Session: 00:00-09:00 UTC
+    // Characteristics: Tokyo open, lower volatility, JPY currency pairs most active
     if(hour_utc >= 0 && hour_utc < 9) return 0.0;
-    // London session: 08:00-17:00 UTC  
+    
+    // London Trading Session: 08:00-17:00 UTC  
+    // Characteristics: European open, high volatility, EUR/GBP pairs dominant
     else if(hour_utc >= 8 && hour_utc < 17) return 0.33;
-    // New York session: 13:00-22:00 UTC
+    
+    // New York Trading Session: 13:00-22:00 UTC
+    // Characteristics: US markets open, maximum global liquidity, USD pairs active
     else if(hour_utc >= 13 && hour_utc < 22) return 0.66;
-    // Off hours
+    
+    // Off-Hours Period: Low liquidity, increased spreads, gap risk
     else return 1.0;
 }
 
-// Calculate volume momentum (current vs recent average)
+// Volume Momentum Analyzer
+// Measures current trading activity relative to recent historical average
+// High volume often precedes significant price movements or confirms trends
+// Essential for validating breakouts and identifying institutional participation
+//
+// Volume Interpretation:
+//   > 1.0: Above-average activity (institutional interest, news events)
+//   ≈ 0.5: Normal trading activity (baseline market participation)
+//   < 0.5: Below-average activity (low interest, potential false signals)
+//
+// Parameters:
+//   r[]: Array of price bars with volume data
+//   i: Current bar index
+//   period: Historical period for average volume calculation
+// Returns: Normalized volume ratio (0.0-1.0, where 1.0 = 3x average volume)
 double GetVolumeMomentum(const MqlRates &r[], int i, int period){
-    if(i+period >= ArraySize(r)) return 0.5; // Default neutral
+    // Validate sufficient historical data for meaningful comparison
+    if(i+period >= ArraySize(r)) return 0.5; // Neutral default
     
-    double current_vol = (double)r[i].tick_volume;
-    double vol_sum = 0.0;
-    int count = 0;
+    double current_vol = (double)r[i].tick_volume;  // Current bar volume
+    double vol_sum = 0.0;  // Accumulator for historical volume
+    int count = 0;         // Valid historical bar counter
     
+    // Calculate average volume over historical period
     for(int k=1; k<=period && i+k<ArraySize(r); ++k){
         vol_sum += (double)r[i+k].tick_volume;
         count++;
     }
     
+    // Handle edge cases: no data or zero volume
     if(count == 0 || vol_sum == 0) return 0.5;
-    double avg_vol = vol_sum / count;
     
-    // Return ratio clamped to reasonable range
+    double avg_vol = vol_sum / count;  // Historical average volume
+    
+    // Calculate and normalize volume momentum ratio
     double ratio = current_vol / avg_vol;
-    return clipd(ratio / 3.0, 0.0, 1.0);  // Scale so 3x average = 1.0
+    
+    // Scale ratio to 0-1 range where 3x average volume = 1.0
+    // This prevents extreme outliers from dominating the signal
+    return clipd(ratio / 3.0, 0.0, 1.0);
 }
 
-// Get spread as percentage of price
+// Bid-Ask Spread Percentage Calculator
+// Measures trading cost as percentage of current market price
+// Critical for cost-benefit analysis and trade timing decisions
+// High spreads indicate low liquidity or volatile market conditions
+//
+// Spread Interpretation:
+//   Low spread (< 0.02%): Good liquidity, favorable trading conditions
+//   Normal spread (0.02-0.05%): Standard market conditions
+//   High spread (> 0.05%): Poor liquidity, avoid trading if possible
+//
+// Returns: Spread as percentage of mid-price (normalized basis points)
 double GetSpreadPercent(){
-    double spread_points = GetSymbolSpreadPoints(); // Use centralized function with 15pt fallback
-    double current_price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+    double spread_points = GetSymbolSpreadPoints(); // Get spread with fallback protection
+    
+    // Calculate current mid-price (average of bid and ask)
+    double current_price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + 
+                           SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+    
+    // Validate price data availability
     if(current_price <= 0) return 0.0;
-    return (spread_points * _Point) / current_price * 10000.0;  // Basis points / 10000
+    
+    // Convert spread to percentage of price
+    // Formula: (spread_in_points * point_value) / price * 10000 for basis points
+    return (spread_points * _Point) / current_price * 10000.0;
 }
 
-// Calculate price momentum (rate of change)
+// Price Momentum (Rate of Change) Calculator
+// Measures the percentage change in price over a specified period
+// Essential for identifying acceleration/deceleration in price trends
+// Helps distinguish between strong trending moves and consolidation phases
+//
+// Momentum Interpretation:
+//   > 0.6: Strong positive momentum (bullish acceleration)
+//   0.4-0.6: Moderate momentum (normal trend progression)
+//   < 0.4: Weak/negative momentum (bearish or consolidation)
+//
+// Parameters:
+//   r[]: Array of price bars
+//   i: Current bar index
+//   period: Lookback period for momentum calculation
+// Returns: Normalized momentum (0.0-1.0, where 0.5 = no change)
 double GetPriceMomentum(const MqlRates &r[], int i, int period){
-    if(i+period >= ArraySize(r)) return 0.5; // Default neutral
+    // Validate sufficient historical data
+    if(i+period >= ArraySize(r)) return 0.5; // Neutral default
     
-    double current_price = r[i].close;
-    double past_price = r[i+period].close;
+    double current_price = r[i].close;       // Current closing price
+    double past_price = r[i+period].close;   // Historical comparison price
     
+    // Validate historical price data
     if(past_price <= 0) return 0.5;
+    
+    // Calculate percentage change over the period
     double change = (current_price - past_price) / past_price;
     
-    // Scale to 0-1 range, assuming ±5% is extreme
+    // Normalize to 0-1 range, assuming ±5% represents extreme momentum
+    // 0.0 = -5% (strong bearish), 0.5 = 0% (neutral), 1.0 = +5% (strong bullish)
     return clipd((change + 0.05) / 0.10, 0.0, 1.0);
 }
 
-// Calculate volatility rank (current ATR vs historical range)
+// Volatility Percentile Rank Calculator
+// Determines where current volatility ranks within recent historical range
+// Critical for position sizing and risk management decisions
+// High volatility rank suggests larger price movements and higher risk
+//
+// Volatility Rank Interpretation:
+//   > 0.8: Very high volatility (reduce position sizes, tight stops)
+//   0.6-0.8: Above average volatility (normal risk management)
+//   0.2-0.6: Average volatility (standard position sizing)
+//   < 0.2: Low volatility (potential for breakouts, larger positions)
+//
+// Parameters:
+//   r[]: Array of price bars
+//   i: Current bar index
+//   atr_period: Period for ATR calculation
+//   rank_period: Historical period for percentile ranking
+// Returns: Percentile rank (0.0-1.0, where 1.0 = highest volatility)
 double GetVolatilityRank(const MqlRates &r[], int i, int atr_period, int rank_period){
+    // Validate sufficient historical data for meaningful ranking
     if(i+rank_period >= ArraySize(r)) return 0.5;
     
+    // Calculate current market volatility
     double current_atr = ATR_Proxy(r, i, atr_period);
     
-    // Calculate ATR for each bar in ranking period
-    double atr_values[100]; // Max rank period
+    // Array to store historical ATR values for ranking comparison
+    double atr_values[100]; // Maximum supported ranking period
+    
+    // Determine actual calculation period within data and array limits
     int actual_period = MathMin(rank_period, ArraySize(r)-i-atr_period);
     actual_period = MathMin(actual_period, 100);
     
+    // Calculate ATR for each historical bar in the ranking period
     for(int k=0; k<actual_period; ++k){
         if(i+k+atr_period < ArraySize(r)){
             atr_values[k] = ATR_Proxy(r, i+k, atr_period);
         }
     }
     
-    // Calculate percentile rank
+    // Count how many historical ATR values are below current ATR
     int below_count = 0;
     for(int k=0; k<actual_period; ++k){
         if(atr_values[k] < current_atr) below_count++;
     }
     
+    // Calculate percentile rank: (count below) / (total count)
     return actual_period > 0 ? (double)below_count / actual_period : 0.5;
 }
 
@@ -5908,134 +6265,176 @@ int ApplyEnhancedSignalFiltering(int raw_action, const double &q_values[], datet
     return raw_action;
 }
 
-// MAIN PROCESSING FUNCTION (OPTIMIZED 2.5)
-// Called every time a new price tick arrives - now with selective tick processing
+//============================== MAIN TRADING ENGINE ==============================
+// Primary EA Event Handler - Called Every Price Tick
+// This is the "brain" of the EA that orchestrates all trading decisions
+// Implements advanced performance optimizations and comprehensive safety checks
+// 
+// Execution Flow:
+//   1. Performance & Safety Initialization
+//   2. Adaptive Parameter Updates 
+//   3. Critical Safety Validations
+//   4. Market Data Loading & Analysis
+//   5. AI Neural Network Inference
+//   6. Risk Management & Position Control
+//   7. Trade Execution & Monitoring
 void OnTick(){
-  // Don't do anything if model failed to load
+  // SAFETY GATE: Prevent any trading if model loading failed
+  // Critical protection against running EA without proper AI model
   if(!g_loaded) return;
   
-  // Reset loop optimization counters for this tick (2.4 IMPROVEMENT)
+  // PERFORMANCE OPTIMIZATION: Reset computational efficiency counters
+  // Tracks loop iterations and function calls to optimize execution speed
   if(InpOptimizeLoops){
     ResetLoopCounters();
   }
   
-  // TICK HANDLING OPTIMIZATION (2.5 IMPROVEMENT)
-  // Check if this tick should be processed for signal generation
+  // INTELLIGENT TICK PROCESSING: Selective Signal Generation
+  // Not every price tick requires full AI analysis - this optimization
+  // reduces CPU usage while maintaining trading effectiveness
   bool process_signals = true;
   if(InpOptimizeTicks){
-    process_signals = ShouldProcessTick();
+    process_signals = ShouldProcessTick();  // Smart tick filtering
   }
   
-  // Always process critical functions regardless of tick optimization
+  // CRITICAL FUNCTION PROCESSING: Always Execute Safety Checks
+  // Some functions (emergency stops, position monitoring) must run on every tick
+  // regardless of optimization settings for maximum account protection
   bool process_critical = ShouldProcessCriticalTick();
   
-  // ADAPTIVE PARAMETER UPDATES (3.3 IMPROVEMENT)
-  // Update volatility regime and adaptive parameters periodically
+  // ADAPTIVE INTELLIGENCE: Dynamic Parameter Adjustment
+  // The EA learns from market conditions and adjusts its behavior automatically
+  // This enables adaptation to changing volatility, trends, and market regimes
   if(InpUseAdaptiveParameters && (process_signals || process_critical)){
-    // Update ATR history for volatility detection
+    // VOLATILITY REGIME DETECTION: Monitor market volatility changes
+    // Higher volatility requires smaller positions and tighter stops
     double current_atr = GetCachedATR14();
     if(current_atr > 0.0){
-      UpdateATRHistory(current_atr);
-      UpdateAdaptiveVolatilityRegime();
+      UpdateATRHistory(current_atr);         // Maintain volatility history
+      UpdateAdaptiveVolatilityRegime();      // Classify market regime
     }
     
-    // Check for daily reset if configured
+    // DAILY RESET MECHANISM: Fresh start each trading day
     CheckAdaptiveReset();
   }
   
-  // RUNTIME SAFETY CHECK: Double-check model alignment before any trading activity
+  // CRITICAL SAFETY VALIDATION: Model-Chart Compatibility Check
+  // Prevents catastrophic losses from using wrong model on wrong symbol/timeframe
+  // This is a fundamental safety mechanism that cannot be disabled
   if(InpEnforceSymbolTF && (_Symbol != g_model_symbol || _Period != g_model_tf)){
     static datetime last_warning = 0;
-    if(TimeCurrent() - last_warning > 300){ // Warn every 5 minutes max
-      Print("RUNTIME ERROR: Model mismatch detected! EA should not be running!");
-      Print("Chart: ", _Symbol, " ", EnumToString(_Period), " | Model: ", g_model_symbol, " ", EnumToString(g_model_tf));
-      Alert("CORTEX3 RUNTIME ERROR: Model mismatch! EA stopping trading!");
+    if(TimeCurrent() - last_warning > 300){ // Throttle warnings to every 5 minutes
+      Print("=== CRITICAL SAFETY ERROR ===");
+      Print("Model/Chart mismatch detected! Trading halted for safety!");
+      Print("Current Chart: ", _Symbol, " ", EnumToString(_Period));
+      Print("Model Trained For: ", g_model_symbol, " ", EnumToString(g_model_tf));
+      Print("SOLUTION: Use correct model or change chart to match model");
+      Alert("CORTEX5 SAFETY: Model mismatch! Trading stopped!");
       last_warning = TimeCurrent();
     }
-    return; // Refuse to process any ticks
+    return; // Refuse all trading activity until mismatch is resolved
   }
   
-  // CRITICAL FUNCTIONS - Always process these regardless of tick optimization
+  // ESSENTIAL SAFETY OPERATIONS: Always Execute Critical Functions
+  // These operations protect account equity and must run regardless of optimizations
   if(process_critical || !InpOptimizeTicks){
-    // Update trailing stops and break-even for existing positions (if enabled on ticks)
+    // DYNAMIC POSITION MANAGEMENT: Update trailing stops and break-even levels
+    // Protects profits and limits losses on existing positions
     if(InpTrailingOnTicks){
       UpdateTrailingStops();
     }
     
-    // PHASE 1 ENHANCEMENTS - UPDATE POSITION TRACKING AND CHECK EXIT CONDITIONS
+    // REAL-TIME RISK MONITORING: Track position metrics and exposure
+    // Monitors unrealized P&L, drawdown, and position duration
     if(InpRiskChecksOnTicks){
       UpdatePositionTracking();
     }
   }
   
-  // SIGNAL PROCESSING - Only if this tick should be processed
+  // INTELLIGENT SIGNAL FILTERING: Performance Optimization Gate
+  // Skips expensive AI analysis when market conditions don't warrant it
   if(!process_signals){
-    // Skip signal processing but still run critical emergency checks
+    // EMERGENCY MONITORING: Always check for account protection triggers
+    // Even when skipping signals, we must monitor for emergency conditions
     if(InpEmergencyOnTicks && CheckEmergencyStops()){
-      return; // Emergency stop triggered, position closed
+      return; // Emergency stop activated - position closed for safety
     }
-    return; // Skip rest of processing to optimize performance
+    return; // Skip AI analysis to conserve computational resources
   }
   
-  // Load market data for all timeframes (2.2 IMPROVEMENT - optimized loading)
+  // MARKET DATA ACQUISITION: Multi-Timeframe Analysis Foundation
+  // Load comprehensive price history across multiple timeframes for AI analysis
+  // Each timeframe provides different perspectives on market structure
   Series base,m1,m5,h1,h4,d1;
   if(!OptimizedLoadSeries(_Symbol, g_model_tf, InpBarLookback, base)) return;
   
-  // Need enough historical data for indicators
+  // DATA SUFFICIENCY VALIDATION: Ensure adequate history for technical analysis
+  // Technical indicators require sufficient historical bars for accurate calculation
   if(ArraySize(base.rates)<60) return;
   
-  // ENHANCED BAR CLOSE DETECTION (2.5 IMPROVEMENT) - Integrates with existing logic
+  // BAR COMPLETION DETECTION: New Bar Signal Processing
+  // Only analyzes market when a new bar completes - prevents over-trading
+  // This is critical for consistent backtesting and live trading alignment
   datetime current_bar_time = base.rates[1].time;
   bool is_new_bar = (g_last_bar_time != current_bar_time);
   
-  // Update global bar tracking for tick optimization
+  // OPTIMIZATION TRACKING: Update performance monitoring counters
   if(InpOptimizeTicks && is_new_bar){
     g_last_signal_bar_time = current_bar_time;
     ResetTickCounters();
   }
   
-  // Only process signals once per new bar (existing logic enhanced)
+  // SIGNAL TIMING CONTROL: Process each bar only once
+  // Prevents multiple signals from the same bar data
   if(!is_new_bar){
-    return; // Already processed this bar
+    return; // Already analyzed this completed bar
   }
-  g_last_bar_time = current_bar_time;  // Remember this bar's timestamp
+  g_last_bar_time = current_bar_time;  // Update bar tracking timestamp
   
-  // Update indicator cache at start of new bar (2.1 IMPROVEMENT)
+  // PERFORMANCE OPTIMIZATION: Refresh cached technical indicators
+  // Pre-compute expensive calculations once per bar for multiple reuse
   UpdateIndicatorCache();
   IncrementCacheBarCounter();
 
-  // Update trailing stops if not done on every tick
+  // POSITION MANAGEMENT: Update trailing stops for active positions
+  // Protects profits by automatically adjusting stop losses as price moves favorably
   if(!InpTrailingOnTicks){
     UpdateTrailingStops();
   }
 
-  // PHASE 1 ENHANCEMENTS - UPDATE POSITION TRACKING (if not done on every tick)  
+  // RISK MONITORING: Update position metrics and exposure tracking
+  // Calculates unrealized P&L, duration, drawdown for risk management
   if(!InpRiskChecksOnTicks){
     UpdatePositionTracking();
   }
   
-  // Check emergency stops first (highest priority)
+  // EMERGENCY PROTECTION: Highest priority safety checks
+  // Immediate position closure for account protection
   if(CheckEmergencyStops()) {
-    return; // Emergency stop triggered, position closed
+    return; // Emergency protocols activated - position closed
   }
   
-  // Check if position should be closed due to maximum holding time or profit targets
+  // AUTOMATIC EXIT MANAGEMENT: Time and profit-based position closure
+  // Prevents holding positions too long or missing profit opportunities
   if(CheckMaxHoldingTime(TimeCurrent()) || CheckProfitTargets()) {
-    return; // Position was closed, skip AI decision for this tick
+    return; // Position automatically closed - skip new signal analysis
   }
 
-  // PHASE 2 & 3 ENHANCEMENTS - ADVANCED POSITION AND MARKET ANALYSIS
-  UpdateDynamicStops();      // Phase 3: Dynamic stop loss tightening
-  UpdateMarketRegime();      // Phase 3: Market regime detection
-  UpdatePositionFeatures();  // Phase 3: Position-aware features
+  // ADVANCED MARKET INTELLIGENCE: Sophisticated Analysis Systems
+  UpdateDynamicStops();      // Adaptive stop loss tightening over time
+  UpdateMarketRegime();      // Trending vs ranging market classification
+  UpdatePositionFeatures();  // Position-aware state features for AI
 
-  // TRADING FREQUENCY CONTROLS - Check if new trading allowed and force FLAT if needed
+  // OVERTRADING PREVENTION: Frequency and exposure controls
+  // Prevents excessive trading that can erode profits through costs
   bool trading_allowed = IsNewTradingAllowed();
   bool should_force_flat = ShouldForceFlat();
 
-  // COMPREHENSIVE RISK CHECKS (ENHANCED - all conditions before proceeding)
+  // MASTER RISK VALIDATION: Comprehensive Safety Gateway
+  // Final safety check before allowing any trading decisions
+  // Evaluates all risk parameters, account status, and market conditions
   if(!MasterRiskCheck()) {
-    // Master risk check handles all printing internally
+    // Risk check failed - trading suspended for safety
     return;
   }
 

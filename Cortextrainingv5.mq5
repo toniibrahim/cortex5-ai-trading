@@ -1106,15 +1106,52 @@ string   g_optimization_results_file = "";      // File to save optimization res
 
 //============================== UTILITY FUNCTIONS ======================
 // Small helper functions used throughout the training process
-int    idx2(const int r,const int c,const int ncols){ return r*ncols + c; } // Convert 2D position to 1D array index
-double clipd(const double x,const double a,const double b){ return (x<a? a : (x>b? b : x)); } // Constrain value to range [a,b]
-double rand01(){ return (double)MathRand()/32767.0; } // Random number between 0 and 1
-int    argmax(const double &v[]){ int m=0; for(int i=1;i<ArraySize(v);++i) if(v[i]>v[m]) m=i; return m; } // Find index of largest value
+// Matrix Index Conversion Utility
+// Converts 2D matrix coordinates (row, col) to flat 1D array index
+// Essential for neural network weight matrices stored as 1D arrays
+// Formula: index = row * number_of_columns + column
+int    idx2(const int r,const int c,const int ncols){ return r*ncols + c; }
+
+// Value Clipping Utility Function
+// Constrains a value to stay within specified bounds [a,b]
+// Critical for preventing neural network output from exploding
+// Used extensively in activation functions and gradient clipping
+double clipd(const double x,const double a,const double b){ return (x<a? a : (x>b? b : x)); }
+
+// Normalized Random Number Generator
+// Generates uniform random numbers in range [0,1] for neural network initialization
+// MQL5's MathRand() returns 0-32767, this normalizes to proper probability range
+// Used for weight initialization and epsilon-greedy exploration
+double rand01(){ return (double)MathRand()/32767.0; }
+
+// Array Maximum Index Finder
+// Returns the index of the largest value in an array
+// Core function for action selection: finds highest Q-value action
+// Used by both training (action selection) and inference (final decision)
+int    argmax(const double &v[]){ int m=0; for(int i=1;i<ArraySize(v);++i) if(v[i]>v[m]) m=i; return m; }
 
 // MATRIX ROW OPERATIONS
 // Helper functions for working with flattened 2D arrays (stored as 1D arrays)
-void   GetRow(const double &src[],int row, double &dst[]){ ArrayResize(dst,STATE_SIZE); int off=row*STATE_SIZE; for(int j=0;j<STATE_SIZE;++j) dst[j]=src[off+j]; } // Extract one row from matrix
-void   SetRow(double &dst[],int row, const double &src[]){ int off=row*STATE_SIZE; for(int j=0;j<STATE_SIZE;++j) dst[off+j]=src[j]; } // Put one row into matrix
+// Matrix Row Extraction Function
+// Extracts a single row from a flattened 2D matrix stored as 1D array
+// Used to retrieve individual training samples from batched state data
+// Each row represents one complete market state (STATE_SIZE features)
+// Critical for batch processing during neural network training
+void   GetRow(const double &src[],int row, double &dst[]){ 
+    ArrayResize(dst,STATE_SIZE); 
+    int off=row*STATE_SIZE; 
+    for(int j=0;j<STATE_SIZE;++j) dst[j]=src[off+j]; 
+}
+
+// Matrix Row Insertion Function
+// Inserts a single row into a flattened 2D matrix stored as 1D array
+// Used to store individual training samples into batched state data
+// Essential for building training batches from collected experiences
+// Maintains proper memory layout for efficient matrix operations
+void   SetRow(double &dst[],int row, const double &src[]){ 
+    int off=row*STATE_SIZE; 
+    for(int j=0;j<STATE_SIZE;++j) dst[off+j]=src[j]; 
+}
 
 //============================== SUMTREE FOR PRIORITIZED EXPERIENCE REPLAY =======================
 // Data structure that efficiently samples experiences based on their importance
@@ -1805,18 +1842,32 @@ class CDoubleDuelingDRQN{
 // GLOBAL NEURAL NETWORKS (Double-Dueling DRQN)
 CDoubleDuelingDRQN g_Q, g_Target;  // Main network (being trained) and target network (for stability)
 
-// IMPROVEMENT 6.1: Ensemble model instances for ensemble training
-CDoubleDuelingDRQN g_ensemble_models[];          // Dynamic array of model instances (6.1)
-bool     g_ensemble_models_allocated = false;    // Whether model array is allocated (6.1)
+// IMPROVEMENT 6.1: Ensemble Learning Infrastructure
+// Multiple model instances for ensemble training and improved generalization
+CDoubleDuelingDRQN g_ensemble_models[];          // Dynamic array of model instances for ensemble learning
+bool     g_ensemble_models_allocated = false;    // Allocation status flag for ensemble model array
+
+// Target Network Synchronization Function
+// Critical component of Double DQN algorithm for training stability
+// Copies weights from main network to target network periodically
+// This prevents the "moving target" problem in Q-learning where both
+// the predictor and target are changing simultaneously, causing instability
 void SyncTarget(){ 
-    g_Target.CopyFrom(g_Q); 
-    // Print("Target network synchronized with main network");
-}  // Copy main network to target network
+    g_Target.CopyFrom(g_Q);  // Deep copy all network parameters
+    // Print("Target network synchronized with main network");  // Debug output disabled for performance
+}
 
 //============================== FUNCTION PROTOTYPES ====================
-// Forward declarations for model saving/loading functions
-void SaveLayer(const int h,const DenseLayer &L);  // Save one layer to file
-void LoadLayer(const int h, DenseLayer &L);       // Load one layer from file
+// Forward declarations for model persistence and data management functions
+// These prototypes allow functions to call each other regardless of definition order
+
+// Model Layer Persistence Functions
+void SaveLayer(const int h,const DenseLayer &L);  // Serialize a dense layer to binary file
+void LoadLayer(const int h, DenseLayer &L);       // Deserialize a dense layer from binary file
+
+// These functions handle the low-level details of saving/loading neural network
+// weights, biases, and optimizer state (Adam momentum/velocity terms)
+// Critical for model persistence between training sessions and deployment
 
 //============================== MODEL SAVE/LOAD FUNCTIONS =====================
 // Functions to save trained models to disk and load them back
@@ -2160,212 +2211,396 @@ struct Series{
     datetime times[];   // Timestamps for each bar
 };
 
-// Load historical price data for training
+// Historical Market Data Loading Function
+// Downloads years of OHLCV price data from MetaTrader 5 server
+// Essential for building training datasets with sufficient market history
+// Parameters:
+//   sym: Symbol to download (e.g., "EURUSD", "GBPUSD")
+//   tf: Timeframe (M1, M5, H1, H4, D1, etc.)
+//   years: How many years of history to retrieve
+//   s: Series structure to store the downloaded data
 bool LoadSeries(const string sym, ENUM_TIMEFRAMES tf, int years, Series &s){
-  ResetLastError();
-  datetime t_to   = TimeCurrent();  // End time (now)
-  int seconds = years*365*24*60*60; // Convert years to seconds
-  datetime t_from = t_to - seconds; // Start time (years ago)
+  ResetLastError();  // Clear any previous errors
   
-  ArraySetAsSeries(s.rates,true);   // Newest data at index 0
-  int copied = CopyRates(sym,tf,t_from,t_to,s.rates);  // Download price data
+  // Calculate time range for data download
+  datetime t_to   = TimeCurrent();              // End time: current server time
+  int seconds = years*365*24*60*60;             // Convert years to seconds (approximate)
+  datetime t_from = t_to - seconds;             // Start time: years ago from now
+  
+  // Configure array indexing (newest data first for easier access)
+  ArraySetAsSeries(s.rates,true);               // Index 0 = most recent bar
+  
+  // Download historical data from MT5 server
+  int copied = CopyRates(sym,tf,t_from,t_to,s.rates);
   if(copied<=0){ 
       Print("CopyRates failed ",sym," ",tf," err=",GetLastError()); 
-      return false; 
+      return false;  // Failed to download data
   }
   
-  // Extract timestamps
+  // Extract timestamps for multi-timeframe synchronization
+  // Timestamps allow us to align data from different timeframes
   int n=ArraySize(s.rates); 
   ArrayResize(s.times,n); 
   for(int i=0;i<n;++i) s.times[i]=s.rates[i].time;
   
   Print("Loaded ",copied," bars ",sym," ",EnumToString(tf));
-  return true;
+  return true;  // Success
 }
 
-// Binary search to find latest bar at or before given time (for multi-timeframe sync)
+// Binary Search for Time-Based Data Synchronization
+// Finds the latest bar that occurred at or before a specific time
+// Critical for aligning multiple timeframes in multi-timeframe analysis
+// Uses efficient O(log n) binary search algorithm instead of O(n) linear search
+// 
+// Parameters:
+//   times[]: Array of timestamps (must be sorted ascending)
+//   n: Size of the times array
+//   t: Target timestamp to search for
+// Returns: Index of latest bar <= target time, or -1 if none found
+//
+// Example: If we have M5 and H1 data, this helps find which M5 bars
+// correspond to each H1 bar for feature calculation
 int FindIndexLE(const datetime &times[], int n, datetime t){ 
-    int lo=0, hi=n-1, ans=-1; 
+    int lo=0, hi=n-1, ans=-1;  // Binary search bounds and result
+    
     while(lo<=hi){ 
-        int mid=(lo+hi)>>1; 
-        if(times[mid]<=t){ ans=mid; lo=mid+1; } 
-        else hi=mid-1; 
+        int mid=(lo+hi)>>1;        // Midpoint (bit shift for fast division by 2)
+        if(times[mid]<=t){         // If midpoint time <= target time
+            ans=mid;               // This could be our answer
+            lo=mid+1;              // Search right half for a later match
+        } 
+        else hi=mid-1;             // Search left half
     } 
-    return ans; 
+    return ans;  // Return index of latest bar <= target time
 }
 
-// FEATURE NORMALIZATION FUNCTIONS
-// Calculate min/max values for each feature across the entire dataset
+//============================== FEATURE NORMALIZATION FUNCTIONS ==============================
+// Neural networks require normalized inputs for stable training and convergence
+// These functions implement min-max scaling to transform features to [0,1] range
+
+// Min-Max Range Calculator for Feature Normalization
+// Analyzes entire dataset to find minimum and maximum values for each feature
+// This enables consistent scaling during both training and inference
+// Critical for neural network stability - prevents features with large ranges
+// from dominating those with small ranges (e.g., price vs. percentage indicators)
+//
+// Parameters:
+//   X[]: Flattened feature matrix (N samples × STATE_SIZE features)
+//   N: Number of training samples
+//   mn[]: Output array for minimum values (one per feature)
+//   mx[]: Output array for maximum values (one per feature)
 void ComputeMinMaxFlat(const double &X[], int N, double &mn[], double &mx[]){
-  ArrayResize(mn,STATE_SIZE); ArrayResize(mx,STATE_SIZE);
-  // Initialize with extreme values
-  for(int j=0;j<STATE_SIZE;++j){ mn[j]=1e100; mx[j]=-1e100; }
+  // Prepare output arrays
+  ArrayResize(mn,STATE_SIZE); 
+  ArrayResize(mx,STATE_SIZE);
   
-  // Find actual min/max for each feature
+  // Initialize with extreme values for proper min/max detection
+  for(int j=0;j<STATE_SIZE;++j){ 
+      mn[j]=1e100;   // Start with very large number
+      mx[j]=-1e100;  // Start with very small number
+  }
+  
+  // Scan entire dataset to find actual min/max for each feature
   for(int i=0;i<N;++i){
-    int off=i*STATE_SIZE;  // Offset for row i
+    int off=i*STATE_SIZE;        // Calculate offset for sample i in flattened array
     for(int j=0;j<STATE_SIZE;++j){
-      double v=X[off+j];  // Feature j of sample i
-      if(v<mn[j]) mn[j]=v; 
-      if(v>mx[j]) mx[j]=v;
+      double v=X[off+j];         // Get feature j from sample i
+      if(v<mn[j]) mn[j]=v;       // Update minimum if smaller value found
+      if(v>mx[j]) mx[j]=v;       // Update maximum if larger value found
     }
   }
   
-  // Ensure non-zero range for each feature
+  // Ensure non-zero range for each feature to prevent division by zero
+  // Constant features (min=max) get artificial range [min, min+1]
   for(int j=0;j<STATE_SIZE;++j){
-    if(mx[j]-mn[j] < 1e-8){ mx[j]=mn[j]+1.0; }  // Avoid division by zero
+    if(mx[j]-mn[j] < 1e-8){      // If range is essentially zero
+        mx[j]=mn[j]+1.0;         // Add unit range to prevent numerical issues
+    }
   }
 }
 
-// Apply min-max normalization to scale features to [0,1] range
+// Min-Max Normalization Application Function
+// Transforms feature vector to [0,1] range using pre-computed min/max values
+// Applied to every state vector before feeding to neural network
+// Formula: normalized = (value - min) / (max - min)
+//
+// This ensures all features contribute equally to neural network decisions
+// regardless of their original scales (price vs. RSI vs. volume, etc.)
+//
+// Parameters:
+//   x[]: Feature vector to normalize (modified in-place)
+//   mn[]: Minimum values for each feature (from ComputeMinMaxFlat)
+//   mx[]: Maximum values for each feature (from ComputeMinMaxFlat)
 void ApplyMinMax(double &x[], const double &mn[], const double &mx[]){ 
     for(int j=0;j<STATE_SIZE;++j){ 
-        x[j]=(x[j]-mn[j])/(mx[j]-mn[j]);  // Scale to [0,1]
-        x[j]=clipd(x[j],0.0,1.0);         // Ensure bounds
+        // Apply min-max scaling formula
+        x[j]=(x[j]-mn[j])/(mx[j]-mn[j]);
+        
+        // Clip to [0,1] bounds to handle outliers beyond training range
+        // This prevents extreme values from breaking neural network training
+        x[j]=clipd(x[j],0.0,1.0);
     } 
 }
 
 // BUILD FEATURE VECTOR FOR AI INPUT  
-// Extract 45 market features that describe current trading conditions (4.3: was 35)
+// Extract 45 market features that describe current trading conditions (4.3: Enhanced from 35)
 //============================== IMPROVEMENT 4.3: ENHANCED FEATURE CALCULATION FUNCTIONS ==================
+// Advanced technical analysis functions for comprehensive market state representation
+// These functions provide the neural network with sophisticated market insights
 
-// Calculate price standard deviation for volatility measurement
+// Standard Deviation Calculator for Volatility Analysis
+// Calculates price volatility using statistical standard deviation
+// Essential for risk assessment and position sizing decisions
+// Formula: σ = √(Σ(xi - μ)² / N) where μ is mean, xi are price values
+//
+// Parameters:
+//   rates[]: Price data array (OHLCV bars)
+//   index: Current bar index to calculate from
+//   period: Number of bars to include in calculation
+// Returns: Standard deviation of close prices over the period
 double GetStandardDeviation(const MqlRates &rates[], int index, int period) {
+    // Boundary validation - need sufficient historical data
     if (index < period - 1 || period <= 1) return 0.0;
     
-    // Calculate mean price (using close prices)
+    // Step 1: Calculate arithmetic mean of close prices
     double sum = 0.0;
     for (int i = 0; i < period; i++) {
-        sum += rates[index - i].close;
+        sum += rates[index - i].close;  // Sum close prices going backwards
     }
-    double mean = sum / period;
+    double mean = sum / period;  // Arithmetic mean
     
-    // Calculate variance
+    // Step 2: Calculate variance (average of squared differences from mean)
     double variance_sum = 0.0;
     for (int i = 0; i < period; i++) {
-        double diff = rates[index - i].close - mean;
-        variance_sum += diff * diff;
+        double diff = rates[index - i].close - mean;  // Deviation from mean
+        variance_sum += diff * diff;                  // Square the deviation
     }
     
-    double variance = variance_sum / period;
-    return MathSqrt(variance);
+    double variance = variance_sum / period;  // Average squared deviation
+    return MathSqrt(variance);                // Standard deviation = √variance
 }
 
-// Calculate volatility ratio (current vs historical)
+// Volatility Regime Detector
+// Compares current market volatility to historical baseline
+// Critical for adaptive position sizing and risk management
+// High ratios indicate volatile conditions requiring smaller positions
+//
+// Parameters:
+//   rates[]: Price data array
+//   index: Current bar index
+//   short_period: Period for current volatility measurement (e.g., 5-10 bars)
+//   long_period: Period for baseline volatility (e.g., 20-50 bars)
+// Returns: Ratio of current/historical volatility (1.0 = normal, >1.0 = high volatility)
 double GetVolatilityRatio(const MqlRates &rates[], int index, int short_period, int long_period) {
+    // Calculate recent volatility (short-term standard deviation)
     double current_vol = GetStandardDeviation(rates, index, short_period);
+    
+    // Calculate baseline volatility (long-term standard deviation)
     double historical_vol = GetStandardDeviation(rates, index, long_period);
     
+    // Avoid division by zero and calculate ratio
     if (historical_vol > 0.0001) {
-        return clipd(current_vol / historical_vol, 0.0, 3.0); // Cap at 3x normal volatility
+        // Cap ratio at 3.0 to prevent extreme values from destabilizing training
+        return clipd(current_vol / historical_vol, 0.0, 3.0);
     }
-    return 1.0; // Default to normal volatility
+    return 1.0; // Default to normal volatility if baseline is too small
 }
 
-// Detect volatility breakouts
+// Volatility Breakout Detection System
+// Identifies when current market volatility significantly exceeds normal levels
+// Crucial for detecting momentum opportunities and avoiding whipsaws
+// Uses ATR (Average True Range) for more accurate volatility measurement
+//
+// Parameters:
+//   rates[]: Price data array
+//   index: Current bar index
+//   period: Lookback period for baseline ATR calculation
+// Returns: Breakout intensity (0.0 = normal, 1.0 = maximum breakout)
 double GetVolatilityBreakout(const MqlRates &rates[], int index, int period) {
+    // Need sufficient history for meaningful comparison
     if (index < period) return 0.0;
     
+    // Get current ATR (14-period is standard)
     double current_atr = ATR_Proxy(rates, index, 14);
     double avg_atr = 0.0;
     
-    // Calculate average ATR over the period
+    // Calculate average ATR over the specified lookback period
+    // This establishes the "normal" volatility baseline
     for (int i = 1; i <= period; i++) {
         avg_atr += ATR_Proxy(rates, index - i, 14);
     }
-    avg_atr /= period;
+    avg_atr /= period;  // Average historical ATR
     
+    // Calculate breakout intensity
     if (avg_atr > 0.0001) {
-        double ratio = current_atr / avg_atr;
-        return clipd((ratio - 1.0) / 2.0, 0.0, 1.0); // 0 = normal, 1 = high breakout
+        double ratio = current_atr / avg_atr;  // Current vs average volatility
+        // Normalize: (ratio-1)/2 maps 1.0→0.0, 3.0→1.0 (reasonable breakout range)
+        return clipd((ratio - 1.0) / 2.0, 0.0, 1.0);
     }
-    return 0.0;
+    return 0.0;  // No breakout detected
 }
 
-// Calculate position within trading week (0=Monday start, 1=Friday end)
+// Weekly Trading Session Position Calculator
+// Encodes the current position within the trading week as a normalized value
+// Captures intraweek patterns (Monday opening effects, Friday closing behaviors)
+// Essential for modeling time-based market seasonality
+//
+// Parameters:
+//   time: Current timestamp to analyze
+// Returns: Normalized position in trading week (0.0 = Monday open, 1.0 = Friday close)
 double GetWeeklyPosition(datetime time) {
     MqlDateTime dt;
-    TimeToStruct(time, dt);
+    TimeToStruct(time, dt);  // Convert timestamp to structured time
     
-    // Monday = 1, Friday = 5 in MQL5
+    // Check if within normal trading weekdays
+    // MQL5: Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5
     if (dt.day_of_week >= 1 && dt.day_of_week <= 5) {
-        double day_progress = (dt.day_of_week - 1) / 4.0; // 0-1 for Mon-Fri
-        double hour_progress = dt.hour / 24.0;
+        // Calculate progress through the 5-day trading week
+        double day_progress = (dt.day_of_week - 1) / 4.0;  // 0.0-1.0 for Mon-Fri
+        
+        // Add intraday progress (hour within current day)
+        double hour_progress = dt.hour / 24.0;  // 0.0-1.0 within current day
+        
+        // Combine day and hour progress (hour contributes 1/5 of daily weight)
         return clipd(day_progress + hour_progress / 5.0, 0.0, 1.0);
     }
-    return 0.5; // Weekend - neutral position
+    return 0.5; // Weekend - return neutral mid-week position
 }
 
-// Calculate position within trading month
+// Monthly Trading Cycle Position Calculator
+// Encodes the current position within the trading month as a normalized value
+// Captures monthly patterns (month-end rebalancing, option expiry effects)
+// Important for modeling institutional trading flows and calendar effects
+//
+// Parameters:
+//   time: Current timestamp to analyze
+// Returns: Normalized position in trading month (0.0 = month start, 1.0 = month end)
 double GetMonthlyPosition(datetime time) {
     MqlDateTime dt;
-    TimeToStruct(time, dt);
+    TimeToStruct(time, dt);  // Convert timestamp to structured time
     
-    // Get days in current month (approximate)
-    int days_in_month = 30; // Simplified
-    if (dt.mon == 2) days_in_month = 28;
-    else if (dt.mon == 4 || dt.mon == 6 || dt.mon == 9 || dt.mon == 11) days_in_month = 30;
-    else days_in_month = 31;
+    // Determine days in current month for accurate normalization
+    int days_in_month = 30;  // Default assumption
     
+    // Handle specific month lengths
+    if (dt.mon == 2) {
+        days_in_month = 28;  // February (non-leap year approximation)
+    }
+    else if (dt.mon == 4 || dt.mon == 6 || dt.mon == 9 || dt.mon == 11) {
+        days_in_month = 30;  // April, June, September, November
+    }
+    else {
+        days_in_month = 31;  // January, March, May, July, August, October, December
+    }
+    
+    // Calculate normalized position within month (0.0 to 1.0)
+    // Subtract 1 from day since months start at day 1, not 0
     return clipd((double)(dt.day - 1) / (double)(days_in_month - 1), 0.0, 1.0);
 }
 
-// Calculate MACD histogram (signal line difference)
+// MACD (Moving Average Convergence Divergence) Signal Calculator
+// Calculates MACD histogram for momentum and trend change detection
+// MACD = Fast_EMA - Slow_EMA, Signal = EMA(MACD), Histogram = MACD - Signal
+// Positive values indicate bullish momentum, negative indicate bearish
+//
+// Parameters:
+//   rates[]: Price data array
+//   index: Current bar index
+//   fast_period: Fast EMA period (typically 12)
+//   slow_period: Slow EMA period (typically 26)
+//   signal_period: Signal line EMA period (typically 9)
+// Returns: Normalized MACD histogram value (-1.0 to 1.0)
 double GetMACDSignal(const MqlRates &rates[], int index, int fast_period, int slow_period, int signal_period) {
+    // Need sufficient history for accurate calculation
     if (index < slow_period + signal_period) return 0.0;
     
-    // Calculate EMAs for MACD
+    // EMA smoothing factors (alpha = 2/(period+1))
     double fast_ema = 0.0, slow_ema = 0.0;
-    double fast_alpha = 2.0 / (fast_period + 1);
-    double slow_alpha = 2.0 / (slow_period + 1);
+    double fast_alpha = 2.0 / (fast_period + 1);  // Fast EMA smoothing factor
+    double slow_alpha = 2.0 / (slow_period + 1);  // Slow EMA smoothing factor
     
-    // Calculate fast EMA
-    fast_ema = rates[index].close;
+    // Calculate Fast EMA (responds quickly to price changes)
+    fast_ema = rates[index].close;  // Initialize with current price
     for (int i = 1; i < fast_period && (index - i) >= 0; i++) {
+        // Apply EMA formula: EMA = α × Current_Price + (1-α) × Previous_EMA
         fast_ema = fast_alpha * rates[index - i].close + (1 - fast_alpha) * fast_ema;
     }
     
-    // Calculate slow EMA
-    slow_ema = rates[index].close;
+    // Calculate Slow EMA (responds slowly to price changes)
+    slow_ema = rates[index].close;  // Initialize with current price
     for (int i = 1; i < slow_period && (index - i) >= 0; i++) {
         slow_ema = slow_alpha * rates[index - i].close + (1 - slow_alpha) * slow_ema;
     }
     
+    // MACD Line = Fast EMA - Slow EMA (measures momentum)
     double macd_line = fast_ema - slow_ema;
     
-    // Calculate signal line (EMA of MACD)
-    double signal_line = macd_line; // Simplified - would need historical MACD values for proper calculation
+    // Signal Line = EMA of MACD (provides trading signals when crossed)
+    // Note: Simplified implementation - proper version would need historical MACD values
+    double signal_line = macd_line;
     
-    // Return normalized histogram
+    // MACD Histogram = MACD - Signal (shows momentum acceleration/deceleration)
     double histogram = macd_line - signal_line;
-    return clipd(histogram / (rates[index].close * 0.001), -1.0, 1.0); // Normalize to price
+    
+    // Normalize histogram relative to price for stable neural network input
+    return clipd(histogram / (rates[index].close * 0.001), -1.0, 1.0);
 }
 
-// Calculate position within Bollinger Bands
+// Bollinger Bands Position Calculator
+// Determines where current price sits within Bollinger Bands (volatility bands)
+// Bollinger Bands = SMA ± (Standard_Deviation × Deviation_Multiplier)
+// Used for mean reversion and volatility analysis
+//
+// Parameters:
+//   rates[]: Price data array
+//   index: Current bar index
+//   period: Period for SMA and standard deviation calculation
+//   deviation: Standard deviation multiplier (typically 2.0)
+// Returns: Normalized position (0.0 = lower band, 0.5 = middle, 1.0 = upper band)
 double GetBollingerPosition(const MqlRates &rates[], int index, int period, double deviation) {
+    // Need sufficient history for meaningful bands
     if (index < period - 1) return 0.5;
     
+    // Calculate center line (Simple Moving Average)
     double sma = SMA_Close(rates, index, period);
+    
+    // Calculate standard deviation for volatility measurement
     double std_dev = GetStandardDeviation(rates, index, period);
     
-    double upper_band = sma + (deviation * std_dev);
-    double lower_band = sma - (deviation * std_dev);
+    // Calculate Bollinger Band boundaries
+    double upper_band = sma + (deviation * std_dev);  // Upper resistance level
+    double lower_band = sma - (deviation * std_dev);  // Lower support level
     double current_price = rates[index].close;
     
+    // Calculate normalized position within bands
     if (upper_band - lower_band > 0.0001) {
+        // Position = (Price - Lower) / (Upper - Lower)
+        // 0.0 = at lower band (oversold), 1.0 = at upper band (overbought)
         return clipd((current_price - lower_band) / (upper_band - lower_band), 0.0, 1.0);
     }
-    return 0.5; // Middle of bands
+    return 0.5; // Default to middle if bands are too narrow
 }
 
-// Calculate Stochastic Oscillator %K
+// Stochastic Oscillator Calculator (%K)
+// Measures where current close price sits within recent high-low range
+// Formula: %K = (Close - Lowest_Low) / (Highest_High - Lowest_Low)
+// Used for overbought/oversold conditions and momentum analysis
+//
+// Parameters:
+//   rates[]: Price data array
+//   index: Current bar index  
+//   period: Lookback period for high/low range (typically 14)
+// Returns: Stochastic value (0.0 = oversold, 1.0 = overbought, 0.5 = neutral)
 double GetStochasticOscillator(const MqlRates &rates[], int index, int period) {
+    // Need sufficient history for meaningful range
     if (index < period - 1) return 0.5;
     
+    // Initialize with current bar's high and low
     double highest_high = rates[index].high;
     double lowest_low = rates[index].low;
     
-    // Find highest high and lowest low over period
+    // Find the highest high and lowest low over the specified period
+    // This establishes the trading range for normalization
     for (int i = 0; i < period; i++) {
         if ((index - i) >= 0) {
             highest_high = MathMax(highest_high, rates[index - i].high);
@@ -2374,10 +2609,14 @@ double GetStochasticOscillator(const MqlRates &rates[], int index, int period) {
     }
     
     double current_close = rates[index].close;
+    
+    // Calculate %K: position of close within high-low range
     if (highest_high - lowest_low > 0.0001) {
+        // 0.0 = close at lowest low (oversold)
+        // 1.0 = close at highest high (overbought)
         return (current_close - lowest_low) / (highest_high - lowest_low);
     }
-    return 0.5; // Middle value
+    return 0.5; // Return neutral if range is too small
 }
 
 // Calculate trend strength (ADX-style indicator)
@@ -7931,73 +8170,127 @@ double EvaluateGreedy(const double &X[], const MqlRates &rates[], int i0, int i1
 }
 
 //============================== MAIN TRAINING FUNCTION ================================
-// This is the entry point that orchestrates the entire training process
+// Master Training Orchestrator - Entry Point for Cortex5 AI Training
+// This function coordinates the entire machine learning pipeline from data loading
+// through model training to final model deployment. It implements a sophisticated
+// multi-phase training system with advanced optimizations and safety mechanisms.
+//
+// Training Pipeline Overview:
+// 1. System Initialization - Setup all subsystems and performance optimizations
+// 2. Data Loading - Download historical market data across multiple timeframes
+// 3. Feature Engineering - Extract 45 technical indicators and market features
+// 4. Data Preprocessing - Normalize features for neural network stability
+// 5. Model Management - Load existing model or initialize fresh network
+// 6. Training Execution - Multi-epoch reinforcement learning with experience replay
+// 7. Validation & Testing - Out-of-sample performance evaluation
+// 8. Model Persistence - Save trained model with metadata for deployment
 void OnStart(){
-  MathSrand((int)TimeLocal());  // Initialize random number generator
+  // Initialize pseudorandom number generator with current time seed
+  // Critical for reproducible yet varied exploration during training
+  MathSrand((int)TimeLocal());
   
-  // IMPROVEMENT 4.1: Initialize risk tracking for enhanced rewards
+  //=== ADVANCED SUBSYSTEM INITIALIZATION ===
+  // Each improvement module enhances a specific aspect of training performance
+  
+  // IMPROVEMENT 4.1: Risk-Adjusted Reward System
+  // Tracks Sharpe ratio, drawdown, and volatility for sophisticated reward signals
   InitializeRiskTracking();
   
-  // IMPROVEMENT 4.2: Initialize transaction cost tracking
+  // IMPROVEMENT 4.2: Realistic Transaction Cost Modeling
+  // Simulates spread, slippage, commission, and swap costs for accurate training
   InitializeTransactionCostTracking();
   
-  // IMPROVEMENT 4.4: Initialize confidence signal tracking
+  // IMPROVEMENT 4.4: Confidence Signal Architecture
+  // Enables model to output confidence scores alongside trading decisions
   InitializeConfidenceTracking();
   
-  // IMPROVEMENT 4.5: Initialize diverse training scenarios
+  // IMPROVEMENT 4.5: Diverse Training Scenario Generation
+  // Creates multiple training periods and data augmentation for robustness
   InitializeDiverseTraining();
   
-  // IMPROVEMENT 4.6: Initialize validation and early stopping system
+  // IMPROVEMENT 4.6: Advanced Validation and Early Stopping
+  // Prevents overfitting through out-of-sample monitoring and adaptive stopping
   InitializeValidationSystem();
   
-  // IMPROVEMENT 5.2: Initialize inner loop optimization system
+  // IMPROVEMENT 5.2: Inner Loop Performance Optimization
+  // Caches expensive computations and minimizes function call overhead
   InitializeLoopOptimization();
   
-  // IMPROVEMENT 5.3: Initialize vectorized operations system
+  // IMPROVEMENT 5.3: Vectorized Mathematical Operations
+  // Uses bulk array operations instead of element-wise loops for speed
   InitializeVectorization();
   
-  // IMPROVEMENT 5.4: Initialize batch training system
+  // IMPROVEMENT 5.4: Advanced Batch Processing System
+  // Implements gradient accumulation and adaptive batch sizing
   InitializeBatchTraining();
   
-  // IMPROVEMENT 5.5: Initialize logging optimization system
+  // IMPROVEMENT 5.5: Selective Logging for Performance
+  // Dramatically reduces console output overhead during tight training loops
   InitializeLoggingOptimization();
   
-  // IMPROVEMENT 5.6: Initialize memory management system
+  // IMPROVEMENT 5.6: Memory Management and Leak Prevention
+  // Implements array pooling and automatic cleanup for long training runs
   InitializeMemoryManagement();
   
-  // IMPROVEMENT 6.1: Initialize ensemble training system
+  // IMPROVEMENT 6.1: Ensemble Learning Framework
+  // Trains multiple models for improved generalization and robustness
   InitializeEnsembleTraining();
   
-  // IMPROVEMENT 6.2: Initialize online learning system
+  // IMPROVEMENT 6.2: Online/Adaptive Learning System
+  // Enables continuous learning and regime adaptation in live trading
   InitializeOnlineLearning();
   
-  // IMPROVEMENT 6.3: Initialize confidence-augmented training system
+  // IMPROVEMENT 6.3: Confidence-Augmented Training
+  // Dual-objective learning for well-calibrated confidence prediction
   InitializeConfidenceTraining();
   
-  // IMPROVEMENT 6.4: Initialize automated hyperparameter tuning system
+  // IMPROVEMENT 6.4: Automated Hyperparameter Optimization
+  // Grid search, Bayesian optimization for automatic parameter tuning
   InitializeHyperparameterTuning();
   
-  // Resolve symbol name ("AUTO" means use current chart symbol)
+  //=== TRAINING SESSION CONFIGURATION ===
+  // Resolve symbol name - "AUTO" uses current chart symbol for convenience
   g_symbol = (InpSymbol=="AUTO" || InpSymbol=="") ? _Symbol : InpSymbol;
-  Print("=== Cortex Double-Dueling DRQN Training Started ===");
-  Print("Training symbol: ", g_symbol);
-  Print("Timeframe: ", EnumToString(InpTF));
-  Print("Training data: ", InpYears, " years");
+  
+  // Display training session header with key parameters
+  Print("======================================================");
+  Print("=== CORTEX5 DOUBLE-DUELING DRQN TRAINING STARTED ===");
+  Print("======================================================");
+  Print("Training Symbol: ", g_symbol, " (resolved from: ", InpSymbol, ")");
+  Print("Primary Timeframe: ", EnumToString(InpTF));
+  Print("Historical Data Range: ", InpYears, " years");
+  Print("Expected Training Duration: ", InpEpochs, " epochs");
 
-  // STEP 1: LOAD HISTORICAL DATA
-  Print("Loading historical market data...");
+  //=== STEP 1: MULTI-TIMEFRAME HISTORICAL DATA ACQUISITION ===
+  Print("\n[STEP 1] Loading multi-timeframe historical market data...");
+  
+  // Initialize data containers for different timeframes
   Series base,m1,m5,h1,h4,d1;
-  if(!LoadSeries(g_symbol, InpTF, InpYears, base)) return;  // Main timeframe
-  // Load supporting timeframes for multi-timeframe analysis
-  LoadSeries(g_symbol, PERIOD_M1, InpYears, m1);
-  LoadSeries(g_symbol, PERIOD_M5, InpYears, m5);
-  LoadSeries(g_symbol, PERIOD_H1, InpYears, h1);
-  LoadSeries(g_symbol, PERIOD_H4, InpYears, h4);
-  LoadSeries(g_symbol, PERIOD_D1, InpYears, d1);
+  
+  // Load primary timeframe data (base for training)
+  if(!LoadSeries(g_symbol, InpTF, InpYears, base)) {
+      Print("FATAL ERROR: Failed to load primary timeframe data");
+      return;
+  }
+  
+  // Load supporting timeframes for comprehensive market context
+  // Multi-timeframe analysis provides richer feature sets and better market understanding
+  LoadSeries(g_symbol, PERIOD_M1, InpYears, m1);  // Tick-level precision
+  LoadSeries(g_symbol, PERIOD_M5, InpYears, m5);  // Short-term patterns
+  LoadSeries(g_symbol, PERIOD_H1, InpYears, h1);  // Intraday trends
+  LoadSeries(g_symbol, PERIOD_H4, InpYears, h4);  // Daily patterns
+  LoadSeries(g_symbol, PERIOD_D1, InpYears, d1);  // Long-term trends
 
+  // Validate sufficient data for meaningful training
   int N = ArraySize(base.rates);
-  if(N<1000){ Print("ERROR: Not enough data for training. Need at least 1000 bars."); return; }
-  Print("Loaded ", N, " bars for training");
+  if(N<1000){ 
+      Print("FATAL ERROR: Insufficient data for training (", N, " bars)");
+      Print("Minimum required: 1000 bars for statistical significance");
+      Print("Recommendation: Increase InpYears or use shorter timeframe");
+      return; 
+  }
+  Print("Successfully loaded ", N, " bars across multiple timeframes");
+  Print("Data quality: ", (N > 5000 ? "EXCELLENT" : (N > 2000 ? "GOOD" : "MINIMUM")));
 
   // IMPROVEMENT 5.1: Initialize and populate indicator cache for performance optimization
   if(InpUseIndicatorCaching) {
@@ -8006,15 +8299,36 @@ void OnStart(){
     Print("IMPROVEMENT 5.1: Indicator caching system ready - performance boost expected!");
   }
 
-  // STEP 2: BUILD FEATURE DATASET
-  Print("Building feature dataset...");
-  double X[]; ArrayResize(X, N*STATE_SIZE);  // Flattened matrix: N rows x STATE_SIZE columns
-  double row[];
+  //=== STEP 2: COMPREHENSIVE FEATURE ENGINEERING ===
+  Print("\n[STEP 2] Building comprehensive feature dataset...");
+  
+  // Allocate feature matrix (flattened for performance)
+  // Layout: [sample0_feat0, sample0_feat1, ..., sample0_feat44, sample1_feat0, ...]
+  double X[]; ArrayResize(X, N*STATE_SIZE);
+  double row[];  // Temporary row buffer for feature calculation
+  
+  // Extract features for each market sample
+  // Features include: price, volume, technical indicators, volatility, time-based signals
+  Print("Extracting ", STATE_SIZE, " features per sample...");
+  int progress_interval = MathMax(N/20, 100);  // Progress updates every 5%
+  
   for(int i=0;i<N;++i){ 
-      BuildStateRow(base,i,m1,m5,h1,h4,d1,row);  // Calculate 45 features for bar i (4.3)
-      SetRow(X,i,row);                           // Store in dataset
+      // Calculate comprehensive market state for bar i
+      // Includes: OHLCV, moving averages, oscillators, volatility, position context
+      BuildStateRow(base,i,m1,m5,h1,h4,d1,row);
+      
+      // Store features in flattened matrix format
+      SetRow(X,i,row);
+      
+      // Progress reporting for long feature extraction
+      if(i % progress_interval == 0) {
+          double progress = (double)i / N * 100.0;
+          Print("  Feature extraction progress: ", DoubleToString(progress,1), "%");
+      }
   }
-  Print("Feature dataset built: ", N, " samples x ", STATE_SIZE, " features");
+  Print("Feature dataset complete: ", N, " samples × ", STATE_SIZE, " features");
+  Print("Total feature matrix size: ", ArraySize(X), " elements (", 
+        DoubleToString(ArraySize(X)*8/1024.0/1024.0,2), " MB)");
   
   // IMPROVEMENT 4.3: Log sample feature analysis for validation
   if(InpUseEnhancedFeatures && N > 100) {
