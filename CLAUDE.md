@@ -26,7 +26,7 @@ This is an MQL5 codebase for MetaTrader 5. There are no traditional build/test c
 ## Key Architecture Concepts
 
 ### AI Model Structure
-- **Input**: 35-feature state vector (STATE_SIZE=35) including price, volume, technical indicators
+- **Input**: 45-feature state vector (STATE_SIZE=45) including price, volume, technical indicators, enhanced volatility measures
 - **Network**: 3-layer dense network (64→64→64) with optional LSTM layer (32 hidden units)
 - **Architecture**: Double-Dueling DRQN separating state-value V(s) from advantage A(s,a)
 - **Output**: 6 trading actions (BUY_STRONG, BUY_WEAK, SELL_STRONG, SELL_WEAK, HOLD, FLAT)
@@ -50,11 +50,11 @@ Models are saved as binary .dat files with:
 ## Important Constants
 
 ```mql5
-#define STATE_SIZE 35    // Number of input features - DO NOT CHANGE
+#define STATE_SIZE 45    // Number of input features - Enhanced from 35 to include volatility measures
 #define ACTIONS 6        // Number of possible trading actions - DO NOT CHANGE
 ```
 
-These constants are fundamental to the architecture. Changing them requires retraining all models.
+These constants are fundamental to the architecture. The STATE_SIZE was enhanced from 35 to 45 features to include advanced volatility measures, time-based features, and market regime indicators. Changing them requires retraining all models.
 
 ## Development Workflow
 
@@ -93,7 +93,7 @@ The system includes multiple safety mechanisms:
 
 When modifying the codebase:
 - Follow MQL5 naming conventions (PascalCase for functions, camelCase for variables)
-- Maintain the 35-feature state vector structure
+- Maintain the 45-feature state vector structure (enhanced from original 35)
 - Preserve model file format compatibility
 - Use consistent error handling patterns with GetLastError()
 - Log important events with appropriate severity levels

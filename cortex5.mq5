@@ -671,7 +671,7 @@ class CInferenceNetwork{
         
         if(has_dueling){
             value_head.in = (has_lstm ? lstm_size : h3);
-            value_head.out = 1;
+            value_head.out = value_head_size;  // Use size from model file instead of hardcoded 1
             advantage_head.in = (has_lstm ? lstm_size : h3);
             advantage_head.out = outS;
             SetupLayer(value_head, value_head.in, value_head.out);
@@ -744,9 +744,14 @@ class CInferenceNetwork{
           mean_adv /= advantage_head.out;
           
           // Combine V(s) + (A(s,a) - mean(A))
+          // For multi-dimensional value head, take mean of value outputs as scalar V(s)
+          double state_value = 0.0;
+          for(int i=0; i<value_head.out; ++i) state_value += v_out[i];
+          state_value /= value_head.out;
+          
           ArrayResize(final_out, outSize);
           for(int i=0; i<outSize; ++i){
-              final_out[i] = v_out[0] + (a_out[i] - mean_adv);
+              final_out[i] = state_value + (a_out[i] - mean_adv);
           }
       } else {
           matvec(L4.W,L4.in,L4.out,lstm_out,final_out); addbias(final_out,L4.out,L4.b); // Layer 4 (output)
@@ -819,9 +824,14 @@ class CInferenceNetwork{
           mean_adv /= advantage_head.out;
           
           // Combine V(s) + (A(s,a) - mean(A)) efficiently
+          // For multi-dimensional value head, take mean of value outputs as scalar V(s)
+          double state_value = 0.0;
+          for(int i=0; i<value_head.out; ++i) state_value += v_out[i];
+          state_value /= value_head.out;
+          
           OptimizedArrayInit(final_out, outSize);
           for(int i=0; i<outSize; ++i){
-              final_out[i] = v_out[0] + (a_out[i] - mean_adv);
+              final_out[i] = state_value + (a_out[i] - mean_adv);
           }
       } else {
           matvec(L4.W,L4.in,L4.out,lstm_out,final_out); addbias(final_out,L4.out,L4.b);

@@ -91,7 +91,7 @@ input int              InpSequenceLen   = 8;   // LSTM sequence length (market m
 
 // TRAINING CONTROL PARAMETERS
 // These control how the AI learns and improves
-input int              InpEpochs        = 3;         // Passes over dataset (more epochs = longer training)
+input int              InpEpochs        = 50;         // Passes over dataset (more epochs = longer training)
 input int              InpBatch         = 64;        // Mini-batch size (number of examples learned from at once)
 input double           InpLR            = 0.00005;   // Learning rate (how fast AI adapts, smaller = more stable)
 input double           InpGamma         = 0.995;     // Discount factor (how much AI values future rewards)
@@ -208,6 +208,13 @@ input double           InpMaxDrawdownPenalty   = 0.5;    // Enhanced penalty for
                                                           // ↳ TEACHES: Large drawdowns reduce overall reward significantly
 input double           InpDrawdownPenaltyCap   = 2.0;    // Maximum absolute drawdown penalty to prevent runaway negative rewards
                                                           // ↳ BALANCE: Prevents penalty from overwhelming positive rewards
+
+// MARKET BIAS CORRECTION - Prevents directional market bias in training
+input bool             InpUseMarketBiasCorrection = true; // Enable market-neutral reward adjustment
+                                                          // ↳ PREVENTS: AI learning to always BUY in bull markets or SELL in bear markets
+input double           InpBiasAdjustmentStrength = 0.3;   // Strength of bias correction (0.0=none, 1.0=full normalization)
+input bool             InpForceBalancedExploration = true; // Force equal exploration of all actions during training
+                                                          // ↳ ENSURES: All 6 actions get equal exploration time for unbiased learning
 input double           InpDrawdownThreshold    = 10.0;   // Drawdown % threshold before penalties kick in (was 5.0%)
                                                           // ↳ BALANCE: More tolerance before penalizing drawdowns
 input double           InpVolatilityPenalty    = 0.005;  // Penalty for high return volatility (4.1)
@@ -275,11 +282,11 @@ input int              InpValidationFrequency  = 5;      // Validate every N epo
                                                           // ↳ FREQUENCY: Balance between monitoring and speed
 input double           InpValidationSplit      = 0.15;   // Validation set size as fraction (4.6)
                                                           // ↳ SPLIT: 15% for validation, 85% for training
-input bool             InpUseEarlyStopping     = true;   // Enable early stopping mechanism (4.6)
+input bool             InpUseEarlyStopping     = false;  // Enable early stopping mechanism (4.6)
                                                           // ↳ OVERFITTING: Stop when performance degrades
-input int              InpEarlyStoppingPatience = 10;    // Epochs to wait before stopping (4.6)
+input int              InpEarlyStoppingPatience = 15;   // Epochs to wait before stopping (4.6)
                                                           // ↳ PATIENCE: Allow temporary performance drops
-input double           InpMinValidationImprovement = 0.001; // Minimum improvement threshold (4.6)
+input double           InpMinValidationImprovement = 0.0001; // Minimum improvement threshold (4.6)
                                                           // ↳ THRESHOLD: Detect meaningful improvements
 input bool             InpUseLearningRateDecay = true;   // Adjust learning rate on plateau (4.6)
                                                           // ↳ OPTIMIZATION: Reduce LR when stuck
@@ -345,7 +352,7 @@ input bool             InpLogVectorPerformance = true;   // Log vectorization pe
 // Advanced batch processing and gradient accumulation for efficient training
 // Focus on processing multiple samples before updating model weights
 
-input bool             InpUseBatchTraining     = true;   // Enable batch training with gradient accumulation (5.4)
+input bool             InpUseBatchTraining     = false;   // Default is disabled, to Enable batch training with gradient accumulation (5.4)
                                                           // ↳ OPTIMIZATION: Update model with accumulated gradients
 input int              InpGradientAccumSteps   = 4;      // Steps to accumulate gradients before update (5.4)
                                                           // ↳ BATCHING: Higher values = more stable gradients
@@ -440,6 +447,7 @@ input bool             InpTrainConfidence      = true;   // Enable confidence tr
 // Where to save the trained AI model
 input string           InpModelFileName   = "DoubleDueling_DRQN_Model.dat"; // File name for saving trained Double-Dueling DRQN model
 input bool             InpForceRetrain    = false;  // Force fresh training even if model exists
+input bool             InpAutoRecovery    = true;   // Enable automatic training mode selection and recovery
 
 // RUNTIME VARIABLES
 string g_symbol = NULL;  // Resolved symbol name ("AUTO" gets replaced with actual symbol)
@@ -451,6 +459,82 @@ int      g_training_steps = 0;        // Number of training steps completed
 double   g_checkpoint_epsilon = 1.0;  // Epsilon value at last checkpoint
 double   g_checkpoint_beta = 0.4;     // Beta value at last checkpoint
 bool     g_is_incremental = false;    // Whether we're doing incremental training
+
+// IMPROVEMENT: Enhanced training mode decision system
+enum TRAINING_MODE {
+    TRAINING_MODE_FRESH,       // Full retraining from scratch
+    TRAINING_MODE_INCREMENTAL, // Continue from checkpoint
+    TRAINING_MODE_HYBRID,      // Partial reset with weight preservation
+    TRAINING_MODE_SKIP         // No training needed
+};
+
+struct TrainingModeDecision {
+    TRAINING_MODE recommended_mode;
+    string reason;
+    string gap_description;
+    int suggested_start_index;
+    int gap_days;
+    double data_overlap_percentage;
+    bool checkpoint_valid;
+    
+    // Copy constructor to avoid deprecated behavior warning
+    TrainingModeDecision(const TrainingModeDecision &other) {
+        recommended_mode = other.recommended_mode;
+        reason = other.reason;
+        gap_description = other.gap_description;
+        suggested_start_index = other.suggested_start_index;
+        gap_days = other.gap_days;
+        data_overlap_percentage = other.data_overlap_percentage;
+        checkpoint_valid = other.checkpoint_valid;
+    }
+    
+    // Default constructor
+    TrainingModeDecision() {
+        recommended_mode = TRAINING_MODE_FRESH;
+        reason = "";
+        gap_description = "";
+        suggested_start_index = 1;
+        gap_days = 0;
+        data_overlap_percentage = 0.0;
+        checkpoint_valid = false;
+    }
+};
+
+// IMPROVEMENT: Training checkpoint backup system
+struct TrainingCheckpointBackup {
+    datetime backup_time;
+    datetime last_trained_time;
+    int training_steps;
+    double checkpoint_epsilon;
+    double checkpoint_beta;
+    bool is_incremental;
+    string model_filename;
+    bool backup_created;
+    
+    // Copy constructor to avoid deprecated behavior warning
+    TrainingCheckpointBackup(const TrainingCheckpointBackup &other) {
+        backup_time = other.backup_time;
+        last_trained_time = other.last_trained_time;
+        training_steps = other.training_steps;
+        checkpoint_epsilon = other.checkpoint_epsilon;
+        checkpoint_beta = other.checkpoint_beta;
+        is_incremental = other.is_incremental;
+        model_filename = other.model_filename;
+        backup_created = other.backup_created;
+    }
+    
+    // Default constructor
+    TrainingCheckpointBackup() {
+        backup_time = 0;
+        last_trained_time = 0;
+        training_steps = 0;
+        checkpoint_epsilon = 1.0;
+        checkpoint_beta = 0.4;
+        is_incremental = false;
+        model_filename = "";
+        backup_created = false;
+    }
+};
 
 // PHASE 1, 2, 3 ENHANCEMENT GLOBALS - TRAINING IMPROVEMENTS
 datetime g_position_start_time = 0;       // When current simulated position was opened (Phase 1)
@@ -1099,10 +1183,8 @@ string   g_optimization_results_file = "";      // File to save optimization res
 
 //============================== AI MODEL CONSTANTS ==========================
 // Fixed parameters that define the AI's structure and capabilities
-// Note: CortexTradeLogic.mqh defines STATE_SIZE=35, but training uses 45 features
-#undef STATE_SIZE  // Undefine to avoid redefinition error
-#define STATE_SIZE 45         // IMPROVEMENT 4.3: Expanded to 45 features (was 35) for enhanced market context
-// Note: ACTION constants are defined in CortexTradeLogic.mqh
+// Note: STATE_SIZE and ACTION constants are defined in CortexTradeLogic.mqh
+// STATE_SIZE = 45 (IMPROVEMENT 4.3: Expanded from 35 features for enhanced market context)
 
 //============================== UTILITY FUNCTIONS ======================
 // Small helper functions used throughout the training process
@@ -1874,11 +1956,21 @@ void LoadLayer(const int h, DenseLayer &L);       // Deserialize a dense layer f
 // Save the trained model to a binary file with training checkpoint data
 bool SaveModel(const string filename, const double &feat_min[], const double &feat_max[]){
   int h=FileOpen(filename,FILE_BIN|FILE_WRITE);
-  if(h==INVALID_HANDLE){ Print("SaveModel: cannot open ",filename); return false; }
+  if(h==INVALID_HANDLE){ 
+      Print("SaveModel: cannot open ",filename, " Error: ", GetLastError()); 
+      return false; 
+  }
+  
+  Print("SaveModel: Successfully opened file: ", filename);
   
   // Write file header with magic number for verification
   long magic=(long)0xC0DE0203;  // Updated magic number for checkpoint-enabled format
-  FileWriteLong(h, magic);
+  if(FileWriteLong(h, magic) == 0) {
+      Print("SaveModel: Failed to write magic number! Error: ", GetLastError());
+      FileClose(h);
+      return false;
+  }
+  Print("SaveModel: Magic number written successfully");
   
   // Write model metadata
   Print("SaveModel: Writing metadata:");
@@ -1923,19 +2015,506 @@ bool SaveModel(const string filename, const double &feat_min[], const double &fe
   Print("  g_checkpoint_epsilon = ", DoubleToString(g_checkpoint_epsilon,4));
   Print("  g_checkpoint_beta = ", DoubleToString(g_checkpoint_beta,4));
   
-  FileWriteLong(h, (long)g_last_trained_time);  // Last training timestamp
-  FileWriteLong(h, (long)g_training_steps);     // Training steps completed
-  FileWriteDouble(h, g_checkpoint_epsilon);     // Current epsilon value
-  FileWriteDouble(h, g_checkpoint_beta);        // Current beta value
+  if(FileWriteLong(h, (long)g_last_trained_time) == 0) {
+      Print("SaveModel: Failed to write checkpoint timestamp! Error: ", GetLastError());
+      FileClose(h);
+      return false;
+  }
+  if(FileWriteLong(h, (long)g_training_steps) == 0) {
+      Print("SaveModel: Failed to write training steps! Error: ", GetLastError());
+      FileClose(h);
+      return false;
+  }
+  if(FileWriteDouble(h, g_checkpoint_epsilon) == 0) {
+      Print("SaveModel: Failed to write epsilon! Error: ", GetLastError());
+      FileClose(h);
+      return false;
+  }
+  if(FileWriteDouble(h, g_checkpoint_beta) == 0) {
+      Print("SaveModel: Failed to write beta! Error: ", GetLastError());
+      FileClose(h);
+      return false;
+  }
+  Print("SaveModel: Checkpoint data written successfully");
   
   // Write all network parameters
   SaveDoubleDuelingDRQN(h, g_Q);
   
   FileClose(h); 
+  
+  // IMPROVEMENT: File integrity verification after saving
+  if(!VerifyModelFile(filename, feat_min, feat_max)){
+      Print("ERROR: Model file verification failed! File may be corrupted.");
+      return false;
+  }
+  
   Print("Model saved with checkpoint data:",filename); 
   Print("Last trained time: ", TimeToString(g_last_trained_time));
   Print("Training steps: ", g_training_steps);
+  Print("✓ File integrity verified successfully");
+  
+  // Final verification: check that file is actually readable
+  int verify_handle = FileOpen(filename, FILE_BIN|FILE_READ);
+  if(verify_handle == INVALID_HANDLE) {
+      Print("SaveModel: ERROR - Cannot re-open saved file for verification!");
+      return false;
+  }
+  
+  long verify_magic = FileReadLong(verify_handle);
+  FileClose(verify_handle);
+  
+  if(verify_magic != (long)0xC0DE0203) {
+      Print("SaveModel: ERROR - Magic number verification failed! Expected: 0xC0DE0203, Got: 0x", IntegerToString(verify_magic, 16));
+      return false;
+  }
+  
+  Print("SaveModel: ✓ Final verification successful - model file is valid");
   return true;
+}
+
+// IMPROVEMENT: Comprehensive training data gap analysis function
+TrainingModeDecision AnalyzeTrainingDataGap(datetime checkpoint_time, const MqlRates &rates[], int data_size){
+    TrainingModeDecision decision;
+    decision.checkpoint_valid = false;
+    decision.gap_days = 0;
+    decision.data_overlap_percentage = 0.0;
+    decision.suggested_start_index = 1;
+    
+    Print("DEBUG AnalyzeTrainingDataGap: checkpoint_time=", (long)checkpoint_time, " (", TimeToString(checkpoint_time), ")");
+    Print("DEBUG: data_size=", data_size);
+    
+    if(data_size < 10){
+        decision.recommended_mode = TRAINING_MODE_FRESH;
+        decision.reason = "Insufficient data available for analysis";
+        decision.gap_description = "Less than 10 bars available";
+        Print("DEBUG: Recommending FRESH due to insufficient data");
+        return decision;
+    }
+    
+    if(checkpoint_time == 0){
+        decision.recommended_mode = TRAINING_MODE_FRESH;
+        decision.reason = "No checkpoint available - first time training";
+        decision.gap_description = "Starting from scratch";
+        Print("DEBUG: Recommending FRESH due to zero checkpoint time");
+        return decision;
+    }
+    
+    datetime oldest_data = rates[data_size-1].time;
+    datetime newest_data = rates[0].time;
+    datetime current_time = TimeCurrent();
+    
+    // Calculate various time gaps
+    int checkpoint_to_oldest = (int)((oldest_data - checkpoint_time) / (24*60*60));
+    int checkpoint_to_newest = (int)((newest_data - checkpoint_time) / (24*60*60));
+    int checkpoint_to_now = (int)((current_time - checkpoint_time) / (24*60*60));
+    int data_span_days = (int)((newest_data - oldest_data) / (24*60*60));
+    
+    decision.gap_days = checkpoint_to_now;
+    
+    // Log detailed gap analysis
+    Print("=== DETAILED GAP ANALYSIS ===");
+    Print("Checkpoint time: ", TimeToString(checkpoint_time));
+    Print("Data range: ", TimeToString(oldest_data), " to ", TimeToString(newest_data));
+    Print("Data span: ", data_span_days, " days");
+    Print("Checkpoint age: ", checkpoint_to_now, " days");
+    Print("Gap to oldest data: ", checkpoint_to_oldest, " days");
+    Print("Gap to newest data: ", checkpoint_to_newest, " days");
+    
+    // Decision logic based on gap analysis
+    if(checkpoint_time > newest_data){
+        // Checkpoint is newer than all available data
+        decision.recommended_mode = TRAINING_MODE_SKIP;
+        decision.reason = "Checkpoint is newer than available data";
+        decision.gap_description = StringFormat("Checkpoint is %d days ahead of newest data", 
+                                               (int)((checkpoint_time - newest_data) / (24*60*60)));
+        return decision;
+    }
+    
+    if(checkpoint_time < oldest_data){
+        // Checkpoint is older than all available data
+        Print("DEBUG: Checkpoint is older than available data");
+        Print("  Checkpoint: ", TimeToString(checkpoint_time));
+        Print("  Oldest data: ", TimeToString(oldest_data));
+        Print("  Gap: ", checkpoint_to_oldest, " days");
+        
+        if(checkpoint_to_oldest > 200){
+            decision.recommended_mode = TRAINING_MODE_FRESH;
+            decision.reason = "Checkpoint predates available data by significant margin";
+            decision.gap_description = StringFormat("Gap of %d days between checkpoint and oldest data", 
+                                                   checkpoint_to_oldest);
+            Print("DEBUG: Recommending FRESH mode due to large gap");
+        } else {
+            decision.recommended_mode = TRAINING_MODE_HYBRID;
+            decision.reason = "Small gap between checkpoint and available data";
+            decision.gap_description = StringFormat("Bridgeable gap of %d days", checkpoint_to_oldest);
+            decision.suggested_start_index = data_size - 100; // Start near oldest data
+            Print("DEBUG: Recommending HYBRID mode due to small gap");
+        }
+        return decision;
+    }
+    
+    // Checkpoint is within data range - find exact position
+    int found_index = -1;
+    for(int i = data_size-1; i >= 0; --i){
+        if(rates[i].time <= checkpoint_time){
+            found_index = i;
+            break;
+        }
+    }
+    
+    if(found_index >= 0){
+        decision.checkpoint_valid = true;
+        int new_bars_available = found_index - 1;
+        decision.data_overlap_percentage = (double)found_index / data_size * 100.0;
+        
+        Print("Checkpoint found at index: ", found_index);
+        Print("New bars available: ", new_bars_available);
+        Print("Data overlap: ", DoubleToString(decision.data_overlap_percentage, 1), "%");
+        
+        if(new_bars_available <= 0){
+            decision.recommended_mode = TRAINING_MODE_SKIP;
+            decision.reason = "No new data available since checkpoint";
+            decision.gap_description = "Model is current with available data";
+        } else if(new_bars_available < 10){
+            decision.recommended_mode = TRAINING_MODE_SKIP;
+            decision.reason = "Too few new bars for meaningful training";
+            decision.gap_description = StringFormat("Only %d new bars available", new_bars_available);
+        } else if(checkpoint_to_now > 30){
+            decision.recommended_mode = TRAINING_MODE_INCREMENTAL; // Change to INCREMENTAL instead of HYBRID
+            decision.reason = "Checkpoint is old but continuing from checkpoint position";
+            decision.gap_description = StringFormat("Checkpoint age: %d days, new bars: %d", 
+                                                   checkpoint_to_now, new_bars_available);
+            decision.suggested_start_index = found_index; // Start exactly at checkpoint, not before
+        } else {
+            decision.recommended_mode = TRAINING_MODE_INCREMENTAL;
+            decision.reason = "Recent checkpoint with sufficient new data";
+            decision.gap_description = StringFormat("Fresh checkpoint with %d new bars", new_bars_available);
+            decision.suggested_start_index = found_index; // Start exactly at checkpoint
+        }
+    } else {
+        // This shouldn't happen if checkpoint is within range, but handle it
+        decision.recommended_mode = TRAINING_MODE_FRESH;
+        decision.reason = "Unable to locate checkpoint in data despite being within range";
+        decision.gap_description = "Data integrity issue detected";
+    }
+    
+    return decision;
+}
+
+// IMPROVEMENT: Create checkpoint backup before training
+TrainingCheckpointBackup CreateCheckpointBackup(){
+    TrainingCheckpointBackup backup;
+    backup.backup_time = TimeCurrent();
+    backup.last_trained_time = g_last_trained_time;
+    backup.training_steps = g_training_steps;
+    backup.checkpoint_epsilon = g_checkpoint_epsilon;
+    backup.checkpoint_beta = g_checkpoint_beta;
+    backup.is_incremental = g_is_incremental;
+    backup.model_filename = InpModelFileName;
+    backup.backup_created = false;
+    
+    // Create backup of model file if it exists
+    string backup_filename = StringFormat("%s.backup_%d", InpModelFileName, (int)backup.backup_time);
+    
+    if(FileIsExist(InpModelFileName)){
+        // Copy current model to backup
+        uchar file_data[];
+        int file_handle = FileOpen(InpModelFileName, FILE_BIN|FILE_READ);
+        if(file_handle != INVALID_HANDLE){
+            FileSeek(file_handle, 0, SEEK_END);
+            ulong file_size = FileTell(file_handle);
+            FileSeek(file_handle, 0, SEEK_SET);
+            
+            ArrayResize(file_data, (int)file_size);
+            FileReadArray(file_handle, file_data, 0, (int)file_size);
+            FileClose(file_handle);
+            
+            // Write backup file
+            int backup_handle = FileOpen(backup_filename, FILE_BIN|FILE_WRITE);
+            if(backup_handle != INVALID_HANDLE){
+                FileWriteArray(backup_handle, file_data, 0, (int)file_size);
+                FileClose(backup_handle);
+                backup.backup_created = true;
+                Print("✓ Checkpoint backup created: ", backup_filename);
+            } else {
+                Print("WARNING: Failed to create checkpoint backup file");
+            }
+        }
+    }
+    
+    Print("Checkpoint backup state saved:");
+    Print("  Backup time: ", TimeToString(backup.backup_time));
+    Print("  Last trained: ", TimeToString(backup.last_trained_time));
+    Print("  Training steps: ", backup.training_steps);
+    Print("  Model backup: ", backup.backup_created ? "Created" : "Not created");
+    
+    return backup;
+}
+
+// IMPROVEMENT: Restore from checkpoint backup if training fails
+bool RestoreCheckpointBackup(const TrainingCheckpointBackup &backup, string failure_reason){
+    Print("=== CHECKPOINT ROLLBACK INITIATED ===");
+    Print("Reason: ", failure_reason);
+    Print("Restoring state from: ", TimeToString(backup.backup_time));
+    
+    // Restore checkpoint variables
+    g_last_trained_time = backup.last_trained_time;
+    g_training_steps = backup.training_steps;
+    g_checkpoint_epsilon = backup.checkpoint_epsilon;
+    g_checkpoint_beta = backup.checkpoint_beta;
+    g_is_incremental = backup.is_incremental;
+    
+    // Restore model file if backup exists
+    if(backup.backup_created){
+        string backup_filename = StringFormat("%s.backup_%d", backup.model_filename, (int)backup.backup_time);
+        
+        if(FileIsExist(backup_filename)){
+            // Delete corrupted current file
+            if(FileIsExist(backup.model_filename)){
+                FileDelete(backup.model_filename);
+            }
+            
+            // Copy backup to original filename
+            uchar file_data[];
+            int backup_handle = FileOpen(backup_filename, FILE_BIN|FILE_READ);
+            if(backup_handle != INVALID_HANDLE){
+                FileSeek(backup_handle, 0, SEEK_END);
+                ulong file_size = FileTell(backup_handle);
+                FileSeek(backup_handle, 0, SEEK_SET);
+                
+                ArrayResize(file_data, (int)file_size);
+                FileReadArray(backup_handle, file_data, 0, (int)file_size);
+                FileClose(backup_handle);
+                
+                // Write restored file
+                int restore_handle = FileOpen(backup.model_filename, FILE_BIN|FILE_WRITE);
+                if(restore_handle != INVALID_HANDLE){
+                    FileWriteArray(restore_handle, file_data, 0, (int)file_size);
+                    FileClose(restore_handle);
+                    Print("✓ Model file restored from backup");
+                } else {
+                    Print("ERROR: Failed to restore model file");
+                    return false;
+                }
+            } else {
+                Print("ERROR: Cannot open backup file for restoration");
+                return false;
+            }
+        } else {
+            Print("WARNING: Backup file not found - cannot restore model");
+        }
+    }
+    
+    Print("✓ Checkpoint rollback completed");
+    Print("System restored to state from: ", TimeToString(backup.last_trained_time));
+    return true;
+}
+
+// IMPROVEMENT: Validate training progress and trigger rollback if needed
+bool ValidateTrainingProgress(const TrainingCheckpointBackup &backup, int epoch, int experiences_added){
+    // Check for training anomalies that suggest problems
+    
+    if(experiences_added <= 0 && epoch > 0){
+        Print("ERROR: No experiences added in epoch ", epoch);
+        RestoreCheckpointBackup(backup, "No training progress - zero experiences");
+        return false;
+    }
+    
+    if(g_step > g_training_steps + 1000000){
+        Print("ERROR: Training steps exploded - possible infinite loop");
+        RestoreCheckpointBackup(backup, "Training step counter anomaly");
+        return false;
+    }
+    
+    if(g_epsilon < 0.0 || g_epsilon > 1.0){
+        Print("ERROR: Epsilon out of valid range: ", DoubleToString(g_epsilon, 6));
+        RestoreCheckpointBackup(backup, "Invalid epsilon value");
+        return false;
+    }
+    
+    if(g_beta < 0.0 || g_beta > 1.0){
+        Print("ERROR: Beta out of valid range: ", DoubleToString(g_beta, 6));
+        RestoreCheckpointBackup(backup, "Invalid beta value");
+        return false;
+    }
+    
+    return true; // Training progress is normal
+}
+
+// IMPROVEMENT: Intelligent auto-recovery analysis 
+bool ShouldForceRetrainForRecovery(){
+    if(!InpAutoRecovery) return false;
+    
+    Print("=== AUTO-RECOVERY ANALYSIS ===");
+    
+    // Check if model file exists
+    if(!FileIsExist(InpModelFileName)){
+        Print("🔧 Model file missing - force retrain recommended");
+        return true;
+    }
+    
+    // Try to load model and analyze checkpoint
+    double temp_feat_min[], temp_feat_max[];
+    bool model_loaded = LoadModel(InpModelFileName, temp_feat_min, temp_feat_max);
+    
+    if(!model_loaded){
+        Print("🔧 Model file corrupted - force retrain recommended");
+        return true;
+    }
+    
+    if(!g_is_incremental){
+        Print("🔧 Model is legacy format - force retrain recommended for upgrade");
+        return true;
+    }
+    
+    if(g_last_trained_time == 0){
+        Print("🔧 Invalid checkpoint timestamp - force retrain recommended");
+        return true;
+    }
+    
+    // Analyze data gap using current time
+    datetime current_time = TimeCurrent();
+    int checkpoint_age_days = (int)((current_time - g_last_trained_time) / (24*60*60));
+    
+    if(checkpoint_age_days > 60){
+        Print("🔧 Checkpoint is ", checkpoint_age_days, " days old - force retrain recommended");
+        return true;
+    }
+    
+    if(g_training_steps == 0){
+        Print("🔧 Zero training steps in checkpoint - force retrain recommended");
+        return true;
+    }
+    
+    if(g_checkpoint_epsilon < 0.0 || g_checkpoint_epsilon > 1.0){
+        Print("🔧 Invalid epsilon in checkpoint - force retrain recommended");
+        return true;
+    }
+    
+    Print("✓ Auto-recovery analysis: Model appears healthy");
+    Print("  Checkpoint age: ", checkpoint_age_days, " days");
+    Print("  Training steps: ", g_training_steps);
+    Print("  Epsilon: ", DoubleToString(g_checkpoint_epsilon, 4));
+    
+    return false; // Model appears healthy
+}
+
+// IMPROVEMENT: Smart training mode override for better outcomes
+TRAINING_MODE OptimizeTrainingModeSelection(TRAINING_MODE recommended_mode, const TrainingModeDecision &decision){
+    if(!InpAutoRecovery) return recommended_mode;
+    
+    Print("=== TRAINING MODE OPTIMIZATION ===");
+    Print("Recommended mode: ", EnumToString(recommended_mode));
+    
+    // Override recommendations in certain scenarios for better outcomes
+    switch(recommended_mode){
+        case TRAINING_MODE_SKIP:
+            // If model is very old but claims to be current, force training
+            if(decision.gap_days > 14){
+                Print("🔧 OVERRIDE: Model claims current but is ", decision.gap_days, " days old");
+                Print("🔧 Switching to HYBRID mode for safety");
+                return TRAINING_MODE_HYBRID;
+            }
+            break;
+            
+        case TRAINING_MODE_FRESH:
+            // If gap is small, consider hybrid instead for efficiency
+            if(decision.gap_days <= 14 && decision.checkpoint_valid){
+                Print("🔧 OVERRIDE: Gap is small (", decision.gap_days, " days) but FRESH recommended");
+                Print("🔧 Switching to HYBRID mode for efficiency");
+                return TRAINING_MODE_HYBRID;
+            }
+            break;
+            
+        case TRAINING_MODE_INCREMENTAL:
+            // If checkpoint is old, consider hybrid for stability
+            if(decision.gap_days > 21){
+                Print("🔧 OVERRIDE: Checkpoint old (", decision.gap_days, " days) but INCREMENTAL recommended");
+                Print("🔧 Switching to HYBRID mode for stability");
+                return TRAINING_MODE_HYBRID;
+            }
+            break;
+            
+        case TRAINING_MODE_HYBRID:
+            // Hybrid is usually the safest choice - no override needed
+            Print("✓ HYBRID mode is optimal for this scenario");
+            break;
+    }
+    
+    Print("✓ Mode selection confirmed: ", EnumToString(recommended_mode));
+    return recommended_mode;
+}
+
+// File integrity verification function
+bool VerifyModelFile(const string filename, const double &feat_min[], const double &feat_max[]){
+    int h = FileOpen(filename, FILE_BIN|FILE_READ);
+    if(h == INVALID_HANDLE){
+        Print("VerifyModelFile: Cannot open file for verification: ", filename);
+        return false;
+    }
+    
+    // Verify magic number
+    long magic = FileReadLong(h);
+    if(magic != (long)0xC0DE0203){
+        Print("VerifyModelFile: Invalid magic number: 0x", IntegerToString(magic, 16));
+        FileClose(h);
+        return false;
+    }
+    
+    // Verify symbol
+    int sym_len = (int)FileReadLong(h);
+    if(sym_len <= 0 || sym_len > 32){
+        Print("VerifyModelFile: Invalid symbol length: ", sym_len);
+        FileClose(h);
+        return false;
+    }
+    
+    string symbol = FileReadString(h, sym_len);
+    if(symbol != g_symbol){
+        Print("VerifyModelFile: Symbol mismatch. Expected: '", g_symbol, "', Got: '", symbol, "'");
+        FileClose(h);
+        return false;
+    }
+    
+    // Verify metadata consistency
+    int timeframe = (int)FileReadLong(h);
+    int state_size = (int)FileReadLong(h);
+    int actions = (int)FileReadLong(h);
+    
+    if(timeframe != InpTF || state_size != STATE_SIZE || actions != ACTIONS){
+        Print("VerifyModelFile: Metadata mismatch. TF: ", timeframe, "/", InpTF, 
+              ", State: ", state_size, "/", STATE_SIZE, ", Actions: ", actions, "/", ACTIONS);
+        FileClose(h);
+        return false;
+    }
+    
+    // Verify architecture parameters
+    int h1 = (int)FileReadLong(h);
+    int h2 = (int)FileReadLong(h);
+    int h3 = (int)FileReadLong(h);
+    
+    if(h1 != g_Q.h1 || h2 != g_Q.h2 || h3 != g_Q.h3){
+        Print("VerifyModelFile: Architecture mismatch. Hidden layers: [", h1, ",", h2, ",", h3, "] vs [", g_Q.h1, ",", g_Q.h2, ",", g_Q.h3, "]");
+        FileClose(h);
+        return false;
+    }
+    
+    // Skip detailed validation (architecture flags, feature normalization, etc.)
+    // Just verify file can be read to completion
+    
+    // Verify checkpoint data
+    FileSeek(h, 0, SEEK_END);
+    ulong file_size = FileTell(h);
+    
+    FileClose(h);
+    
+    if(file_size < 1000){ // Minimum reasonable file size
+        Print("VerifyModelFile: File too small: ", file_size, " bytes. Possible corruption.");
+        return false;
+    }
+    
+    Print("VerifyModelFile: Basic verification passed. File size: ", file_size, " bytes");
+    return true;
 }
 
 // Save Double-Dueling DRQN network to file
@@ -3447,7 +4026,11 @@ int SelectActionEpsGreedyOptimized(const double &state[], int bar_index) {
     
     // Epsilon-greedy selection (inlined for performance)
     if(rand01() < g_epsilon) {
-        return (int)(MathRand() % ACTIONS); // Random action
+        int random_val = MathRand();
+        int selected_action = (int)(random_val % ACTIONS);
+        // Print("DEBUG: Optimized random exploration - g_epsilon=", DoubleToString(g_epsilon,3), 
+        //       " MathRand()=", random_val, " ACTIONS=", ACTIONS, " selected_action=", selected_action);
+        return selected_action; // Random action
     } else {
         // Find best action (inlined argmax for performance)
         int best_action = 0;
@@ -7231,6 +7814,7 @@ void UpdateReturnHistory(double period_return){
     // Update cumulative statistics
     g_return_sum += period_return;
     g_return_sum_squares += period_return * period_return;
+    g_cumulative_return += period_return; // Fix: Update cumulative return for profit-risk ratio
     
     // Track downside deviation for Sortino ratio
     if(period_return < 0){
@@ -7238,8 +7822,14 @@ void UpdateReturnHistory(double period_return){
         g_negative_return_count++;
     }
     
-    // Update equity tracking
-    g_current_equity += period_return;
+    // Update equity tracking for drawdown calculation (with realistic bounds)
+    double scaled_return = period_return * 10.0; // Reduced scaling (was 100.0)
+    g_current_equity += scaled_return;
+    
+    // Prevent unrealistic equity values
+    g_current_equity = MathMax(1000.0, g_current_equity); // Floor at $1000
+    g_current_equity = MathMin(100000.0, g_current_equity); // Cap at $100k
+    
     if(g_current_equity > g_peak_equity){
         g_peak_equity = g_current_equity;
     }
@@ -7248,6 +7838,17 @@ void UpdateReturnHistory(double period_return){
     double current_drawdown = g_peak_equity - g_current_equity;
     if(current_drawdown > g_max_system_drawdown){
         g_max_system_drawdown = current_drawdown;
+    }
+    
+    // Periodic equity reset to prevent unrealistic accumulation
+    static int equity_reset_counter = 0;
+    equity_reset_counter++;
+    if(equity_reset_counter % 50000 == 0) { // Reset every 50k actions
+        Print("DEBUG: Resetting equity tracking - was: ", DoubleToString(g_current_equity,2));
+        g_current_equity = 10000.0; // Reset to starting equity
+        g_peak_equity = 10000.0;
+        g_max_system_drawdown = 0.0;
+        g_cumulative_return = 0.0; // Reset cumulative tracking
     }
 }
 
@@ -7366,12 +7967,73 @@ double CalculateProfitToRiskRatio(double current_return){
     double risk_measure = MathMax(0.001, g_max_system_drawdown); // Use max drawdown as risk measure
     double profit_measure = MathMax(0.0, g_cumulative_return);   // Only positive cumulative returns
     
-    if(risk_measure > 0){
+    // DEBUG: Log calculation details periodically
+    static int debug_counter = 0;
+    debug_counter++;
+    if(debug_counter % 10000 == 0) {
+        Print("DEBUG Profit-Risk: cumulative_return=", DoubleToString(g_cumulative_return,6), 
+              " max_drawdown=", DoubleToString(g_max_system_drawdown,6), 
+              " profit_measure=", DoubleToString(profit_measure,6), 
+              " risk_measure=", DoubleToString(risk_measure,6));
+    }
+    
+    if(risk_measure > 0 && profit_measure > 0){
         double ratio = profit_measure / risk_measure;
         return InpRiskRewardWeight * ratio;
     }
     
     return 0.0;
+}
+
+// MARKET BIAS CORRECTION: Update action reward statistics
+void UpdateActionRewardStats(int action, double reward) {
+    if(action >= 0 && action < 6) {
+        g_action_reward_sums[action] += reward;
+        g_action_reward_counts[action]++;
+    }
+}
+
+// MARKET BIAS CORRECTION: Calculate market-neutral reward adjustment
+double CalculateMarketBiasCorrection(int action, double base_reward) {
+    if(!InpUseMarketBiasCorrection || g_total_actions < 5000) return base_reward; // Need sufficient data
+    
+    // Calculate average reward for each action type
+    double action_averages[6] = {0,0,0,0,0,0};
+    double overall_average = 0.0;
+    int total_valid_actions = 0;
+    
+    for(int i = 0; i < 6; i++) {
+        if(g_action_reward_counts[i] > 0) {
+            action_averages[i] = g_action_reward_sums[i] / g_action_reward_counts[i];
+            overall_average += action_averages[i];
+            total_valid_actions++;
+        }
+    }
+    
+    if(total_valid_actions > 0) {
+        overall_average /= total_valid_actions;
+        
+        // Calculate bias for current action
+        if(g_action_reward_counts[action] > 100) { // Need sufficient samples for this action
+            double action_bias = action_averages[action] - overall_average;
+            
+            // Apply correction - reduce reward if action is consistently over-rewarded
+            double correction = -action_bias * InpBiasAdjustmentStrength;
+            
+            // Log bias correction periodically
+            static int bias_log_counter = 0;
+            bias_log_counter++;
+            if(bias_log_counter % 2000 == 0 && action < 2) { // Log for BUY actions
+                Print("BIAS CORRECTION: Action ", action, " avg=", DoubleToString(action_averages[action],4), 
+                      " overall=", DoubleToString(overall_average,4), " bias=", DoubleToString(action_bias,4), 
+                      " correction=", DoubleToString(correction,4));
+            }
+            
+            return base_reward + correction;
+        }
+    }
+    
+    return base_reward;
 }
 
 // Log detailed reward breakdown for analysis (4.1)
@@ -7397,6 +8059,7 @@ void LogRewardBreakdown(double base_reward, double total_reward, int action){
         Print("  Total Reward: ", DoubleToString(total_reward, 6));
         Print("  Current Equity: ", DoubleToString(g_current_equity, 2));
         Print("  Max Drawdown: ", DoubleToString(g_max_system_drawdown, 2));
+        Print("  Cumulative Return: ", DoubleToString(g_cumulative_return, 6)); // DEBUG: Show cumulative return
         Print("  Return History Count: ", g_return_history_count);
     }
 }
@@ -7952,6 +8615,28 @@ double ComputeEnhancedReward(const MqlRates &r[], int i, int action, datetime ba
                          drawdown_penalty + flat_bonus + sell_promotion_bonus + regime_bonus +
                          sharpe_component + enhanced_drawdown_penalty + volatility_penalty + profit_risk_ratio;
     
+    // MARKET BIAS CORRECTION: Apply market-neutral adjustment
+    total_reward = CalculateMarketBiasCorrection(action, total_reward);
+    
+    // AGGRESSIVE BIAS PENALTY: Extra penalty for overused actions
+    if(InpForceBalancedExploration && g_total_actions > 1000) {
+        double action_percentage = 100.0 * g_action_counts[action] / g_total_actions;
+        if(action == BUY_STRONG && action_percentage > 50.0) {
+            double overuse_penalty = -(action_percentage - 50.0) * 0.01; // Increasing penalty above 50%
+            total_reward += overuse_penalty;
+            
+            static int penalty_log_counter = 0;
+            penalty_log_counter++;
+            if(penalty_log_counter % 5000 == 0) {
+                Print("DEBUG: BUY_STRONG overuse penalty: ", DoubleToString(overuse_penalty,4), 
+                      " (usage: ", DoubleToString(action_percentage,1), "%)");
+            }
+        }
+    }
+    
+    // Update action reward statistics for bias tracking
+    UpdateActionRewardStats(action, total_reward);
+    
     // Log detailed reward breakdown for analysis (4.1)
     LogRewardBreakdown(base_reward, total_reward, action);
     
@@ -8003,9 +8688,42 @@ int    g_step=0;                      // Current training step
 double g_epsilon=InpEpsStart;         // Current exploration rate
 double g_beta=InpPER_BetaStart;       // Current PER importance sampling weight
 
+// DEBUG: Action distribution tracking
+int g_action_counts[6] = {0,0,0,0,0,0}; // Count of each action selected
+int g_total_actions = 0;               // Total actions selected
+
+// MARKET BIAS CORRECTION: Track rewards by action type for normalization
+double g_action_reward_sums[6] = {0,0,0,0,0,0}; // Sum of rewards for each action
+int g_action_reward_counts[6] = {0,0,0,0,0,0};  // Count of rewards for each action
+double g_market_bias_correction = 0.0;         // Overall market bias correction factor
+
 // Calculate current exploration rate (epsilon) - decays over time
 double EpsNow(){ 
     if(InpEpsDecaySteps<=0) return InpEpsEnd; 
+    
+    // BIAS CORRECTION: Force high exploration until balanced action distribution is achieved
+    if(InpForceBalancedExploration && g_total_actions > 1000) {
+        // Check if distribution is severely imbalanced (any action > 70% or BUY_STRONG > 50%)
+        bool severely_imbalanced = false;
+        for(int i = 0; i < 6; i++) {
+            double action_percentage = 100.0 * g_action_counts[i] / g_total_actions;
+            // More aggressive threshold for BUY_STRONG bias
+            double threshold = (i == 0) ? 50.0 : 70.0; // BUY_STRONG should stay under 50%
+            if(action_percentage > threshold) {
+                severely_imbalanced = true;
+                break;
+            }
+        }
+        
+        // Force high exploration if severely imbalanced
+        if(severely_imbalanced) {
+            double forced_epsilon = 0.8; // Force 80% exploration when imbalanced
+            // Print("DEBUG: Forcing high epsilon (", DoubleToString(forced_epsilon,2), 
+            //       ") due to action imbalance at step ", g_step);
+            return forced_epsilon; // Maintain high exploration regardless of decay schedule
+        }
+    }
+    
     double frac = (double)g_step/(double)InpEpsDecaySteps; 
     if(frac>1.0) frac=1.0; 
     return InpEpsStart + (InpEpsEnd-InpEpsStart)*frac;  // Linear decay
@@ -8041,18 +8759,55 @@ int SelectActionEpsGreedy(const double &state[]){
     }
     
     if(rand01()<g_epsilon) {
+        // FORCED BALANCED EXPLORATION: Ensure all actions get equal exploration time
+        if(InpForceBalancedExploration && g_total_actions > 0) {
+            // Find the least explored action
+            int min_count = g_action_counts[0];
+            int least_explored_action = 0;
+            for(int i = 1; i < 6; i++) {
+                if(g_action_counts[i] < min_count) {
+                    min_count = g_action_counts[i];
+                    least_explored_action = i;
+                }
+            }
+            
+            // Force exploration of underexplored actions
+            double exploration_bias = 0.4; // 40% chance to select least explored action
+            if(rand01() < exploration_bias) {
+                Print("DEBUG: Forced exploration of action ", least_explored_action, " (count: ", min_count, ")");
+                return least_explored_action;
+            }
+        }
+        
         // Enhanced exploration with weighted random selection (Phase 2)
         if(InpFlatActionWeight > 1.0 && rand01() < 0.2){
+            Print("DEBUG: FLAT action selected during exploration");
             return ACTION_FLAT;  // 20% chance to explore FLAT action during exploration
         }
-        return MathRand()%ACTIONS;  // Standard random action (exploration)
+        int random_val = MathRand();
+        int selected_action = random_val % ACTIONS;
+        Print("DEBUG: Random exploration - g_epsilon=", DoubleToString(g_epsilon,3), 
+              " MathRand()=", random_val, " ACTIONS=", ACTIONS, " selected_action=", selected_action);
+        return selected_action;  // Standard random action (exploration)
     }
     
     // IMPROVEMENT 4.4: Apply confidence-based action selection
     int best_action = argmax(q);
+    
+    // Debug: Log Q-values for exploitation
+    static int exploit_log_counter = 0;
+    exploit_log_counter++;
+    if(exploit_log_counter % 500 == 0) {
+        Print("DEBUG: Exploitation - Q-values: [", 
+              DoubleToString(q[0],3), ",", DoubleToString(q[1],3), ",", DoubleToString(q[2],3), ",",
+              DoubleToString(q[3],3), ",", DoubleToString(q[4],3), ",", DoubleToString(q[5],3), 
+              "] best_action=", best_action);
+    }
+    
     if(InpUseConfidenceOutput && confidence < g_confidence_threshold){
         // Low confidence - prefer FLAT action
         if(rand01() < (g_confidence_threshold - confidence)){
+            Print("DEBUG: Low confidence override - selecting FLAT action");
             return ACTION_FLAT;  // Choose FLAT when confidence is low
         }
     }
@@ -8359,9 +9114,19 @@ void OnStart(){
   // STEP 4: INITIALIZE AI COMPONENTS OR LOAD EXISTING MODEL
   Print("Checking for existing model...");
   
+  // IMPROVEMENT: Intelligent training mode selection
+  bool should_force_retrain = InpForceRetrain;
+  if(InpAutoRecovery && !InpForceRetrain){
+      // Analyze if forcing retrain would be beneficial
+      if(ShouldForceRetrainForRecovery()){
+          should_force_retrain = true;
+          Print("🔧 AUTO-RECOVERY: Enabling force retrain for data recovery");
+      }
+  }
+  
   // Try to load existing model first
   double temp_feat_min[], temp_feat_max[];
-  if(!InpForceRetrain && LoadModel(InpModelFileName, temp_feat_min, temp_feat_max)){
+  if(!should_force_retrain && LoadModel(InpModelFileName, temp_feat_min, temp_feat_max)){
       Print("Existing model loaded successfully");
       // Check if we should use incremental training
       if(g_is_incremental && g_last_trained_time > 0){
@@ -8448,6 +9213,21 @@ void OnStart(){
       Print("  Volatility Penalty: ", DoubleToString(InpVolatilityPenalty, 4));
       Print("  Risk-Reward Weight: ", DoubleToString(InpRiskRewardWeight, 3));
       Print("  Risk Lookback Period: ", InpRiskLookbackPeriod, " bars");
+  }
+  
+  // MARKET BIAS CORRECTION logging
+  Print("Market Bias Correction: ", InpUseMarketBiasCorrection ? "ENABLED" : "DISABLED");
+  if(InpUseMarketBiasCorrection){
+      Print("  Adjustment Strength: ", DoubleToString(InpBiasAdjustmentStrength, 2));
+      Print("  Purpose: Prevent AI from learning directional market bias");
+      Print("  Effect: Normalize rewards across BUY/SELL actions for balanced learning");
+  }
+  
+  // FORCED BALANCED EXPLORATION logging
+  Print("Forced Balanced Exploration: ", InpForceBalancedExploration ? "ENABLED" : "DISABLED");
+  if(InpForceBalancedExploration){
+      Print("  Effect: Maintains high epsilon when action distribution is imbalanced");
+      Print("  Purpose: Prevent early exploitation of biased actions (e.g., always BUY_STRONG)");
       Print("  Downside Dev Penalty: ", DoubleToString(InpDownsideDevPenalty, 4));
       Print("  Use Sortino Ratio: ", InpUseSortinoRatio ? "YES" : "NO (Sharpe)");
   }
@@ -8558,43 +9338,96 @@ void OnStart(){
       Print("Latest data time: ", TimeToString(base.rates[0].time));
       Print("Oldest data time: ", TimeToString(base.rates[N-1].time));
       
-      // Find the index corresponding to the last trained time
-      // Remember: base.rates[0] = newest, base.rates[N-1] = oldest
-      int found_index = -1;
-      for(int i=N-1; i>=0; --i){  // Start from oldest and work towards newest
-          if(base.rates[i].time <= g_last_trained_time){
-              found_index = i;
-              break;
-          }
-      }
+      // IMPROVEMENT: Enhanced gap analysis and recovery logic
+      Print("=== CHECKPOINT ANALYSIS ===");
+      Print("g_last_trained_time: ", TimeToString(g_last_trained_time), " (", (long)g_last_trained_time, ")");
+      Print("Current time: ", TimeToString(TimeCurrent()));
+      Print("Data range: ", TimeToString(base.rates[N-1].time), " to ", TimeToString(base.rates[0].time));
       
-      if(found_index >= 0 && found_index > 1){
-          training_start_index = found_index - 1;  // Start from the bar after checkpoint
-          Print("Resuming training from bar index: ", training_start_index);
-          if(training_start_index < N){
-              Print("This corresponds to time: ", TimeToString(base.rates[training_start_index].time));
-          }
-          
-          // Restore training state from checkpoint
-          g_step = g_training_steps;
-          g_epsilon = g_checkpoint_epsilon;
-          g_beta = g_checkpoint_beta;
-          
-          Print("Training state restored:");
-          Print("  Steps: ", g_step);
-          Print("  Epsilon: ", DoubleToString(g_epsilon,4));
-          Print("  Beta: ", DoubleToString(g_beta,4));
-          
-          // Check if checkpoint is too recent (no new data)
-          if(training_start_index <= 1){
-              Print("Checkpoint is at latest data - no new bars to train on");
+      TrainingModeDecision mode_decision = AnalyzeTrainingDataGap(g_last_trained_time, base.rates, N);
+      
+      // IMPROVEMENT: Optimize training mode selection for better outcomes
+      TRAINING_MODE optimized_mode = OptimizeTrainingModeSelection(mode_decision.recommended_mode, mode_decision);
+      mode_decision.recommended_mode = optimized_mode;
+      
+      switch(mode_decision.recommended_mode){
+          case TRAINING_MODE_INCREMENTAL:
+              Print("✓ Gap analysis: INCREMENTAL training recommended");
+              Print("  Reason: ", mode_decision.reason);
+              Print("  Checkpoint date: ", TimeToString(g_last_trained_time));
+              Print("  Suggested start index: ", mode_decision.suggested_start_index);
+              training_start_index = mode_decision.suggested_start_index;
+              
+              // Validate start index to prevent regression
+              if(training_start_index >= 0 && training_start_index < ArraySize(base.rates)) {
+                  Print("  Suggested start date: ", TimeToString(base.rates[training_start_index].time));
+                  // Ensure we don't go backwards from checkpoint
+                  if(base.rates[training_start_index].time < g_last_trained_time) {
+                      Print("WARNING: Start date is before checkpoint! Correcting...");
+                      // Find the correct index for checkpoint time
+                      for(int idx = 0; idx < ArraySize(base.rates); idx++) {
+                          if(base.rates[idx].time <= g_last_trained_time) {
+                              training_start_index = idx;
+                              Print("  Corrected start index: ", idx, " (", TimeToString(base.rates[idx].time), ")");
+                              break;
+                          }
+                      }
+                  }
+              }
+              
+              // Restore training state from checkpoint
+              g_step = g_training_steps;
+              g_epsilon = g_checkpoint_epsilon;
+              g_beta = g_checkpoint_beta;
+              
+              Print("Training state restored:");
+              Print("  Resume from index: ", training_start_index);
+              Print("  Resume from time: ", TimeToString(base.rates[training_start_index].time));
+              Print("  Steps: ", g_step);
+              Print("  Epsilon: ", DoubleToString(g_epsilon,4));
+              Print("  Beta: ", DoubleToString(g_beta,4));
+              break;
+              
+          case TRAINING_MODE_FRESH:
+              Print("⚠️ Gap analysis: FRESH training recommended");
+              Print("  Reason: ", mode_decision.reason);
+              Print("  Gap details: ", mode_decision.gap_description);
+              g_is_incremental = false;
+              break;
+              
+          case TRAINING_MODE_HYBRID:
+              Print("🔄 Gap analysis: HYBRID training recommended");
+              Print("  Reason: ", mode_decision.reason);
+              Print("  Strategy: Partial model reset with data bridging");
+              
+              // Hybrid approach: Keep network weights but reset training parameters
+              g_step = 0; // Reset training steps for fresh learning schedule
+              g_epsilon = InpEpsStart * 0.5; // Start with reduced exploration
+              g_beta = InpPER_BetaStart;
+              training_start_index = mode_decision.suggested_start_index;
+              
+              Print("Hybrid training state:");
+              Print("  Network weights: PRESERVED");
+              Print("  Training schedule: RESET");
+              Print("  Start index: ", training_start_index);
+              Print("  Start time: ", TimeToString(base.rates[training_start_index].time));
+              break;
+              
+          case TRAINING_MODE_SKIP:
+              Print("ℹ️ Gap analysis: SKIP training recommended");
+              Print("  Reason: ", mode_decision.reason);
               Print("Model is already up to date!");
               return;
+      }
+      
+      // Additional validation for incremental/hybrid modes
+      if(mode_decision.recommended_mode != TRAINING_MODE_FRESH && 
+         mode_decision.recommended_mode != TRAINING_MODE_SKIP){
+          if(training_start_index <= 1){
+              Print("ERROR: Calculated start index is invalid (", training_start_index, ")");
+              Print("Falling back to fresh training mode");
+              g_is_incremental = false;
           }
-      } else {
-          Print("Warning: Could not find checkpoint time in data or checkpoint too old");
-          Print("Starting training from beginning");
-          g_is_incremental = false;
       }
   } else {
       Print("=== FRESH TRAINING MODE ===");
@@ -8664,6 +9497,9 @@ void OnStart(){
         g_checkpoint_epsilon = InpEpsStart;
         g_checkpoint_beta = InpPER_BetaStart;
     }
+    
+    // IMPROVEMENT: Create checkpoint backup before training
+    TrainingCheckpointBackup checkpoint_backup = CreateCheckpointBackup();
   
   for(int epoch=0; epoch<InpEpochs; ++epoch){
     // IMPROVEMENT 5.5: Optimized epoch logging
@@ -8811,8 +9647,56 @@ void OnStart(){
       }
       SetPositionFeatures(row, pos_dir, pos_size, unrealized_pnl);
       
-      // IMPROVEMENT 5.2: Choose action using optimized epsilon-greedy policy with NN output caching
-      int a = (InpOptimizeInnerLoops) ? SelectActionEpsGreedyOptimized(row, i) : SelectActionEpsGreedy(row);
+      // EMERGENCY BIAS CORRECTION: Override action selection if severely imbalanced
+      int a = 0; // Initialize to prevent compilation warning
+      bool emergency_override = false;
+      if(InpForceBalancedExploration && g_total_actions > 1000) {
+          double buy_strong_percentage = 100.0 * g_action_counts[0] / g_total_actions;
+          if(buy_strong_percentage > 50.0) { // More aggressive threshold
+              // Emergency: force selection of non-BUY_STRONG actions
+              static int emergency_counter = 0;
+              emergency_counter++;
+              
+              // More aggressive intervention based on bias severity
+              int intervention_frequency = 2; // Default every 2nd action
+              if(buy_strong_percentage > 80.0) intervention_frequency = 1; // Every action if very biased
+              else if(buy_strong_percentage > 70.0) intervention_frequency = 2; // Every 2nd action
+              else if(buy_strong_percentage > 60.0) intervention_frequency = 3; // Every 3rd action
+              else intervention_frequency = 5; // Every 5th action
+              
+              if(emergency_counter % intervention_frequency == 0) {
+                  // Select from actions 1-5 (anything except BUY_STRONG)
+                  a = 1 + (MathRand() % 5);
+                  emergency_override = true;
+                  if(emergency_counter % 1000 == 0) { // Log every 1000 overrides
+                      Print("DEBUG: Emergency override - forcing action ", a, " (BUY_STRONG at ", 
+                            DoubleToString(buy_strong_percentage,1), "%, freq=", intervention_frequency, ")");
+                  }
+              }
+          }
+      }
+      
+      if(!emergency_override) {
+          // IMPROVEMENT 5.2: Choose action using optimized epsilon-greedy policy with NN output caching
+          a = (InpOptimizeInnerLoops) ? SelectActionEpsGreedyOptimized(row, i) : SelectActionEpsGreedy(row);
+      }
+      
+      // DEBUG: Track action distribution
+      if(a >= 0 && a < 6) {
+          g_action_counts[a]++;
+          g_total_actions++;
+          
+          // Log distribution every 1000 actions
+          if(g_total_actions % 1000 == 0) {
+              Print("DEBUG: Action Distribution after ", g_total_actions, " actions (epsilon=", DoubleToString(g_epsilon,3), "):");
+              Print("  BUY_STRONG(0): ", g_action_counts[0], " (", 100.0*g_action_counts[0]/g_total_actions, "%)");
+              Print("  BUY_WEAK(1): ", g_action_counts[1], " (", 100.0*g_action_counts[1]/g_total_actions, "%)");
+              Print("  SELL_STRONG(2): ", g_action_counts[2], " (", 100.0*g_action_counts[2]/g_total_actions, "%)");
+              Print("  SELL_WEAK(3): ", g_action_counts[3], " (", 100.0*g_action_counts[3]/g_total_actions, "%)");
+              Print("  HOLD(4): ", g_action_counts[4], " (", 100.0*g_action_counts[4]/g_total_actions, "%)");
+              Print("  FLAT(5): ", g_action_counts[5], " (", 100.0*g_action_counts[5]/g_total_actions, "%)");
+          }
+      }
       
       // IMPROVEMENT 6.3: Generate confidence prediction alongside action selection
       double trading_confidence = 0.5; // Default confidence
@@ -9039,6 +9923,12 @@ void OnStart(){
     Print("Current epsilon: ", DoubleToString(g_epsilon,3), ", Training steps: ", g_step);
     Print("Progress: trained up to ", TimeToString(g_last_trained_time));
     
+    // IMPROVEMENT: Validate training progress and rollback if needed
+    if(!ValidateTrainingProgress(checkpoint_backup, epoch, experiences_added)){
+        Print("CRITICAL ERROR: Training validation failed - execution terminated");
+        return; // Exit training due to validation failure
+    }
+    
     // IMPROVEMENT 4.6: Advanced validation with early stopping
     bool should_stop = false;
     if(InpUseAdvancedValidation && val_start < N){
@@ -9080,9 +9970,21 @@ void OnStart(){
       
   } else {
       Print("Saving trained model with checkpoint data...");
+      
+      // FORCE UPDATE: Ensure checkpoint reflects current training completion
+      if(g_last_trained_time == 0 || g_last_trained_time < base.rates[0].time) {
+          g_last_trained_time = base.rates[0].time; // Set to newest available data
+          Print("FORCED UPDATE: Setting checkpoint to newest data time");
+      }
+      
+      Print("Final checkpoint data being saved:");
+      Print("  g_last_trained_time: ", TimeToString(g_last_trained_time), " (", (long)g_last_trained_time, ")");
+      Print("  g_training_steps: ", g_training_steps);
+      Print("  Model filename: ", InpModelFileName);
       SaveModel(InpModelFileName, feat_min, feat_max);
       Print("=== TRAINING COMPLETED SUCCESSFULLY ===");
       Print("Trained model saved as: ", InpModelFileName);
+      Print("Model file now contains checkpoint: ", TimeToString(g_last_trained_time));
       
       // IMPROVEMENT 6.2: Final online learning performance summary
       if(InpUseOnlineLearning && g_online_learning_initialized) {

@@ -10,14 +10,285 @@
 
 input string InpModelFileName = "DoubleDueling_DRQN_Model.dat";
 
+// Neural network weight validation function
+bool ValidateNetworkWeights(int file_handle, int state_size, int actions, int h1, int h2, int h3,
+                           bool has_lstm, int lstm_size, bool has_dueling, 
+                           int value_head_size, int adv_head_size,
+                           bool has_confidence, int confidence_head_size){
+    
+    if(file_handle == INVALID_HANDLE) return false;
+    
+    ulong file_pos_start = FileTell(file_handle);
+    int layers_validated = 0;
+    int total_weights = 0;
+    int total_biases = 0;
+    
+    // Validate Layer 1: state_size -> h1
+    if(!ValidateLayer(file_handle, state_size, h1, "Layer 1")) return false;
+    total_weights += state_size * h1;
+    total_biases += h1;
+    layers_validated++;
+    
+    // Validate Layer 2: h1 -> h2  
+    if(!ValidateLayer(file_handle, h1, h2, "Layer 2")) return false;
+    total_weights += h1 * h2;
+    total_biases += h2;
+    layers_validated++;
+    
+    // Validate Layer 3: h2 -> h3
+    if(!ValidateLayer(file_handle, h2, h3, "Layer 3")) return false;
+    total_weights += h2 * h3;
+    total_biases += h3;
+    layers_validated++;
+    
+    int lstm_output_size = h3;
+    
+    // Validate LSTM layer if enabled
+    if(has_lstm){
+        if(!ValidateLSTMLayer(file_handle, h3, lstm_size, "LSTM Layer")) return false;
+        total_weights += h3 * lstm_size * 4 + lstm_size * lstm_size * 4; // 4 gates
+        total_biases += lstm_size * 4;
+        lstm_output_size = lstm_size;
+        layers_validated++;
+    }
+    
+    // Validate Dueling heads if enabled
+    if(has_dueling){
+        // Value head: lstm_output -> value_head_size -> 1
+        if(!ValidateLayer(file_handle, lstm_output_size, value_head_size, "Value Head")) return false;
+        total_weights += lstm_output_size * value_head_size;
+        total_biases += value_head_size;
+        
+        // Advantage head: lstm_output -> adv_head_size -> actions
+        if(!ValidateLayer(file_handle, lstm_output_size, adv_head_size, "Advantage Head")) return false;
+        total_weights += lstm_output_size * adv_head_size;
+        total_biases += adv_head_size;
+        layers_validated += 2;
+    } else {
+        // Standard output layer: lstm_output -> actions
+        if(!ValidateLayer(file_handle, lstm_output_size, actions, "Output Layer")) return false;
+        total_weights += lstm_output_size * actions;
+        total_biases += actions;
+        layers_validated++;
+    }
+    
+    // Validate Confidence head if enabled
+    if(has_confidence){
+        if(!ValidateLayer(file_handle, lstm_output_size, confidence_head_size, "Confidence Head")) return false;
+        total_weights += lstm_output_size * confidence_head_size;
+        total_biases += confidence_head_size;
+        layers_validated++;
+    }
+    
+    Print("Network validation summary:");
+    Print("  Layers validated: ", layers_validated);
+    Print("  Total weights: ", total_weights);
+    Print("  Total biases: ", total_biases);
+    Print("  Total parameters: ", total_weights + total_biases);
+    
+    // Calculate expected file size and compare with actual
+    ulong expected_size = CalculateExpectedFileSize(state_size, actions, h1, h2, h3, 
+                                                   has_lstm, lstm_size, has_dueling,
+                                                   value_head_size, adv_head_size, 
+                                                   has_confidence, confidence_head_size);
+    
+    ulong current_pos = FileTell(file_handle);
+    FileSeek(file_handle, 0, SEEK_END);
+    ulong actual_size = FileTell(file_handle);
+    
+    Print("File size analysis:");
+    Print("  Expected size: ", expected_size, " bytes (", DoubleToString(expected_size/1024.0, 1), " KB)");
+    Print("  Actual size: ", actual_size, " bytes (", DoubleToString(actual_size/1024.0, 1), " KB)");
+    
+    double size_diff_pct = MathAbs((double)(actual_size - expected_size)) / expected_size * 100.0;
+    Print("  Size difference: ", DoubleToString(size_diff_pct, 1), "%");
+    
+    if(size_diff_pct > 10.0){
+        Print("  ⚠️ WARNING: Significant size difference detected. File may be corrupted.");
+    } else {
+        Print("  ✓ File size is within expected range");
+    }
+    
+    return true;
+}
+
+// Validate individual layer structure
+bool ValidateLayer(int file_handle, int expected_in, int expected_out, string layer_name){
+    if(file_handle == INVALID_HANDLE) return false;
+    
+    // Read layer dimensions
+    int layer_in = (int)FileReadLong(file_handle);
+    int layer_out = (int)FileReadLong(file_handle);
+    
+    if(layer_in != expected_in || layer_out != expected_out){
+        Print("ERROR: ", layer_name, " dimension mismatch. Expected [", expected_in, "x", expected_out, 
+              "], got [", layer_in, "x", layer_out, "]");
+        return false;
+    }
+    
+    // Skip weights and biases (just validate they exist)
+    for(int i = 0; i < layer_in * layer_out; i++){
+        double weight = FileReadDouble(file_handle);
+        if(!IsValidWeight(weight)){
+            Print("WARNING: ", layer_name, " contains invalid weight: ", DoubleToString(weight, 8));
+        }
+    }
+    
+    for(int j = 0; j < layer_out; j++){
+        double bias = FileReadDouble(file_handle);
+        if(!IsValidWeight(bias)){
+            Print("WARNING: ", layer_name, " contains invalid bias: ", DoubleToString(bias, 8));
+        }
+    }
+    
+    Print("✓ ", layer_name, ": [", layer_in, "x", layer_out, "] validated");
+    return true;
+}
+
+// Validate LSTM layer structure
+bool ValidateLSTMLayer(int file_handle, int expected_in, int expected_out, string layer_name){
+    if(file_handle == INVALID_HANDLE) return false;
+    
+    int lstm_in = (int)FileReadLong(file_handle);
+    int lstm_out = (int)FileReadLong(file_handle);
+    
+    if(lstm_in != expected_in || lstm_out != expected_out){
+        Print("ERROR: ", layer_name, " dimension mismatch. Expected [", expected_in, "x", expected_out, 
+              "], got [", lstm_in, "x", lstm_out, "]");
+        return false;
+    }
+    
+    // Skip LSTM weights (4 gates, input and hidden weights, biases)
+    int total_input_weights = lstm_in * lstm_out * 4;  // Wf, Wi, Wc, Wo
+    int total_hidden_weights = lstm_out * lstm_out * 4; // Uf, Ui, Uc, Uo  
+    int total_biases = lstm_out * 4; // bf, bi, bc, bo
+    
+    for(int i = 0; i < total_input_weights + total_hidden_weights + total_biases; i++){
+        FileReadDouble(file_handle); // Skip LSTM parameters
+    }
+    
+    Print("✓ ", layer_name, ": [", lstm_in, "x", lstm_out, "] validated");
+    return true;
+}
+
+// Check if weight value is reasonable
+bool IsValidWeight(double weight){
+    if(weight != weight) return false; // NaN check
+    if(weight > 1e6 || weight < -1e6) return false; // Extreme value check
+    return true;
+}
+
+// Calculate expected file size based on architecture
+ulong CalculateExpectedFileSize(int state_size, int actions, int h1, int h2, int h3,
+                               bool has_lstm, int lstm_size, bool has_dueling,
+                               int value_head_size, int adv_head_size,
+                               bool has_confidence, int confidence_head_size){
+    
+    ulong total_size = 0;
+    
+    // Header and metadata
+    total_size += 8;  // Magic number
+    total_size += 8;  // Symbol length
+    total_size += 20; // Symbol string (estimated average)
+    total_size += 8;  // Timeframe
+    total_size += 8;  // State size
+    total_size += 8;  // Actions
+    total_size += 8 * 3; // Hidden layer sizes (h1, h2, h3)
+    
+    // Architecture flags (8 parameters for checkpoint format)
+    total_size += 8 * 8; // LSTM, Dueling, Confidence flags + sizes
+    
+    // Feature normalization (min/max pairs)
+    total_size += state_size * 8 * 2; // Double values for min and max
+    
+    // Checkpoint data
+    total_size += 8;  // Last trained time
+    total_size += 8;  // Training steps
+    total_size += 8;  // Epsilon
+    total_size += 8;  // Beta
+    
+    // Neural network weights
+    // Layer 1: state_size -> h1
+    total_size += 8 + 8; // Layer dimensions
+    total_size += (state_size * h1 + h1) * 8; // Weights + biases
+    
+    // Layer 2: h1 -> h2
+    total_size += 8 + 8; // Layer dimensions
+    total_size += (h1 * h2 + h2) * 8; // Weights + biases
+    
+    // Layer 3: h2 -> h3
+    total_size += 8 + 8; // Layer dimensions
+    total_size += (h2 * h3 + h3) * 8; // Weights + biases
+    
+    int final_layer_input = h3;
+    
+    // LSTM layer if enabled
+    if(has_lstm){
+        total_size += 8 + 8; // LSTM dimensions
+        // LSTM weights: 4 gates * (input_weights + hidden_weights + biases)
+        total_size += (h3 * lstm_size * 4 + lstm_size * lstm_size * 4 + lstm_size * 4) * 8;
+        final_layer_input = lstm_size;
+    }
+    
+    // Output layers
+    if(has_dueling){
+        // Value head
+        total_size += 8 + 8; // Dimensions
+        total_size += (final_layer_input * value_head_size + value_head_size) * 8;
+        
+        // Advantage head  
+        total_size += 8 + 8; // Dimensions
+        total_size += (final_layer_input * adv_head_size + adv_head_size) * 8;
+    } else {
+        // Standard output layer
+        total_size += 8 + 8; // Dimensions
+        total_size += (final_layer_input * actions + actions) * 8;
+    }
+    
+    // Confidence head if enabled
+    if(has_confidence){
+        total_size += 8 + 8; // Dimensions
+        total_size += (final_layer_input * confidence_head_size + confidence_head_size) * 8;
+    }
+    
+    return total_size;
+}
+
 void OnStart(){
     Print("=== DOUBLE-DUELING DRQN MODEL DIAGNOSTIC TOOL ===");
     Print("Analyzing model file: ", InpModelFileName);
     
+    // Get file size for validation
+    string full_path = TerminalInfoString(TERMINAL_DATA_PATH) + "\\MQL5\\Files\\" + InpModelFileName;
+    ulong file_size = 0;
+    
     int h = FileOpen(InpModelFileName, FILE_BIN|FILE_READ);
     if(h == INVALID_HANDLE){
         Print("ERROR: Cannot open model file. File may not exist.");
-        Print("Expected location: ", TerminalInfoString(TERMINAL_DATA_PATH), "\\MQL5\\Files\\", InpModelFileName);
+        Print("Expected location: ", full_path);
+        return;
+    }
+    
+    // Get file size
+    FileSeek(h, 0, SEEK_END);
+    file_size = FileTell(h);
+    FileSeek(h, 0, SEEK_SET);
+    
+    Print("File size: ", file_size, " bytes (", DoubleToString(file_size/1024.0/1024.0, 2), " MB)");
+    
+    // Validate minimum file size
+    if(file_size < 1000){
+        Print("ERROR: File too small (", file_size, " bytes). Minimum expected: 1000 bytes");
+        Print("This file appears to be corrupted or incomplete.");
+        FileClose(h);
+        return;
+    }
+    
+    // Validate maximum reasonable file size (prevent loading huge corrupted files)
+    if(file_size > 500*1024*1024){ // 500MB
+        Print("ERROR: File too large (", DoubleToString(file_size/1024.0/1024.0, 2), " MB). Maximum expected: 500 MB");
+        Print("This file may be corrupted or not a valid model file.");
+        FileClose(h);
         return;
     }
     
@@ -66,27 +337,33 @@ void OnStart(){
     // Read architecture parameters (for new format)
     bool has_lstm = false;
     bool has_dueling = false;
+    bool has_confidence = false;
     int lstm_size = 0;
     int seq_len = 0;
     int value_head_size = 0;
     int adv_head_size = 0;
+    int confidence_head_size = 0;
     
     bool has_checkpoint = (magic == (long)0xC0DE0203);
     if(has_checkpoint){
         has_lstm = (FileReadLong(h) == 1);
         has_dueling = (FileReadLong(h) == 1);
+        has_confidence = (FileReadLong(h) == 1);  // FIX: Read missing confidence flag
         lstm_size = (int)FileReadLong(h);
         seq_len = (int)FileReadLong(h);
         value_head_size = (int)FileReadLong(h);
         adv_head_size = (int)FileReadLong(h);
+        confidence_head_size = (int)FileReadLong(h);  // FIX: Read missing confidence head size
         
         Print("DEBUG: Architecture flags read:");
         Print("  LSTM enabled: ", has_lstm);
         Print("  Dueling enabled: ", has_dueling);
+        Print("  Confidence enabled: ", has_confidence);
         Print("  LSTM size: ", lstm_size);
         Print("  Sequence length: ", seq_len);
         Print("  Value head size: ", value_head_size);
         Print("  Advantage head size: ", adv_head_size);
+        Print("  Confidence head size: ", confidence_head_size);
     }
     
     Print("Model metadata:");
@@ -99,6 +376,7 @@ void OnStart(){
     string arch_desc = IntegerToString(state_size) + "x[" + IntegerToString(h1) + "," + IntegerToString(h2) + "," + IntegerToString(h3);
     if(has_lstm) arch_desc += ",LSTM:" + IntegerToString(lstm_size);
     if(has_dueling) arch_desc += ",Dueling:" + IntegerToString(value_head_size) + "+" + IntegerToString(adv_head_size);
+    if(has_confidence) arch_desc += ",Confidence:" + IntegerToString(confidence_head_size);
     arch_desc += "]x" + IntegerToString(actions);
     
     Print("  Network architecture: ", arch_desc);
@@ -117,14 +395,37 @@ void OnStart(){
             Print("      - Advantage head size: ", adv_head_size);
             Print("      - Purpose: Better action selection in noisy markets");
         }
+        Print("    Confidence Network: ", has_confidence ? "ENABLED" : "DISABLED");
+        if(has_confidence){
+            Print("      - Confidence head size: ", confidence_head_size);
+            Print("      - Purpose: Uncertainty estimation for trade filtering");
+        }
     } else {
         Print("  Advanced features: NONE (legacy format)");
     }
     
-    // Skip feature normalization data
+    // Validate feature normalization data
+    double feat_min[], feat_max[];
+    ArrayResize(feat_min, state_size);
+    ArrayResize(feat_max, state_size);
+    
+    bool normalization_valid = true;
     for(int i=0; i<state_size; ++i){
-        FileReadDouble(h);  // min
-        FileReadDouble(h);  // max
+        feat_min[i] = FileReadDouble(h);  // min
+        feat_max[i] = FileReadDouble(h);  // max
+        
+        // Validate normalization ranges
+        if(feat_max[i] <= feat_min[i]){
+            Print("WARNING: Feature ", i, " has invalid normalization range [", 
+                  DoubleToString(feat_min[i], 6), ", ", DoubleToString(feat_max[i], 6), "]");
+            normalization_valid = false;
+        }
+    }
+    
+    if(normalization_valid){
+        Print("✓ Feature normalization: Valid ranges for all ", state_size, " features");
+    } else {
+        Print("⚠️ Feature normalization: Some features have invalid ranges");
     }
     
     // Read checkpoint data if available
@@ -152,6 +453,19 @@ void OnStart(){
         }
     } else {
         Print("No checkpoint data (legacy format)");
+    }
+    
+    // NEURAL NETWORK WEIGHT VALIDATION
+    Print("=== NEURAL NETWORK VALIDATION ===");
+    bool weights_valid = ValidateNetworkWeights(h, state_size, actions, h1, h2, h3, 
+                                               has_lstm, lstm_size, has_dueling, 
+                                               value_head_size, adv_head_size, 
+                                               has_confidence, confidence_head_size);
+    
+    if(weights_valid){
+        Print("✓ Neural network weights: Structure validated successfully");
+    } else {
+        Print("✗ Neural network weights: Validation failed or file corrupted");
     }
     
     FileClose(h);
