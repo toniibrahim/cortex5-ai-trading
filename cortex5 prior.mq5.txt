@@ -664,35 +664,26 @@ class CInferenceNetwork{
     }
     
     // Set up the entire network structure
-void InitFromSizes(int inS,int h1S,int h2S,int h3S,int outS){ 
-    inSize=inS; h1=h1S; h2=h2S; h3=h3S; outSize=outS; 
-
-    // Base stack
-    SetupLayer(L1,inSize,h1); 
-    SetupLayer(L2,h1,h2); 
-    SetupLayer(L3,h2,h3); 
-
-    // Where heads/output take input from
-    int final_in = (has_lstm ? lstm_size : h3);
-
-    if(has_dueling){
-        // Dueling: Value is a scalar, Advantage is per action
-        value_head.in  = final_in;
-        value_head.out = 1;                 // <-- FIX: value head is 1, not value_head_size
-        advantage_head.in  = final_in;
-        advantage_head.out = outS;
-
-        SetupLayer(value_head, value_head.in, value_head.out);
-        SetupLayer(advantage_head, advantage_head.in, advantage_head.out);
-    } else {
-        // Non-dueling: single output layer
-        SetupLayer(L4, final_in, outS);     // <-- FIX: use final_in (lstm_size if LSTM enabled)
+    void InitFromSizes(int inS,int h1S,int h2S,int h3S,int outS){ 
+        inSize=inS; h1=h1S; h2=h2S; h3=h3S; outSize=outS; 
+        SetupLayer(L1,inSize,h1); SetupLayer(L2,h1,h2); 
+        SetupLayer(L3,h2,h3); 
+        
+        if(has_dueling){
+            value_head.in = (has_lstm ? lstm_size : h3);
+            value_head.out = value_head_size;  // Use size from model file instead of hardcoded 1
+            advantage_head.in = (has_lstm ? lstm_size : h3);
+            advantage_head.out = outS;
+            SetupLayer(value_head, value_head.in, value_head.out);
+            SetupLayer(advantage_head, advantage_head.in, advantage_head.out);
+        } else {
+            SetupLayer(L4,h3,outS);
+        }
+        
+        if(has_lstm){
+            lstm.Init(h2, lstm_size);
+        }
     }
-
-    if(has_lstm){
-        lstm.Init(h3, lstm_size);           // <-- FIX: trainer uses LSTM(h3 → lstm_size)
-    }
-}
     
     // Matrix-vector multiplication: multiply weights by input values
     void matvec(const double &W[],int in,int out,const double &x[],double &z[]){ 
@@ -1086,156 +1077,139 @@ bool ReadSymbolAndTF(int h, string &sym, ENUM_TIMEFRAMES &tf)
 }
 
 
-// Loads Double-Dueling DRQN model file with v4/v5 header compatibility (confidence head aware).
-// ---- Helper: peek next Dense layer dims as 32-bit integers (no consumption) ----
-bool PeekNextLayerDims(const int h, int &in_units, int &out_units)
-{
-   long pos = (long)FileTell(h);                // explicit cast to avoid ulong→long warning
-   if(pos < 0) return false;
 
-   if(FileIsEnding(h)) { FileSeek(h, pos, SEEK_SET); return false; }
-
-   // Layer headers in your .dat store dims as 4-byte ints, not 8-byte longs:
-   int inI  = (int)FileReadInteger(h, INT_VALUE);   // 4 bytes
-   if(FileIsEnding(h)) { FileSeek(h, pos, SEEK_SET); return false; }
-   int outI = (int)FileReadInteger(h, INT_VALUE);   // 4 bytes
-
-   // Rewind — we only peek
-   FileSeek(h, pos, SEEK_SET);
-
-   // Sanity guard
-   if(inI <= 0 || outI <= 0 || inI > 20000 || outI > 20000) return false;
-
-   in_units  = inI;
-   out_units = outI;
-   return true;
-}
-
-// ===== Replace your LoadModel with this version =====
-
+// MAIN MODEL LOADING FUNCTION
+// This loads the trained AI model from a file and sets up the neural network
 bool LoadModel(const string filename){
+  // Try to open the model file
   int h=FileOpen(filename,FILE_BIN|FILE_READ);
   if(h==INVALID_HANDLE){ 
       Print("EA LoadModel: cannot open ",filename," err=",GetLastError()); 
       return false; 
   }
 
-  // Magic
+  // Check magic number to verify this is our model format
   long magic=FileReadLong(h);
-  bool has_checkpoint=false;
-  if(magic==(long)0xC0DE0203 || magic==(long)0xC0DE0204) has_checkpoint=true;
-  else if(magic==(long)0xC0DE0202) has_checkpoint=false;
-  else { PrintFormat("EA LoadModel: unsupported magic 0x%I64X",magic); FileClose(h); return false; }
-
-  // Symbol + TF (length-prefixed in v203+)
-  ulong pos=FileTell(h);
-  int sym_len=(int)FileReadLong(h);
-  if(sym_len>0 && sym_len<=64){
-    g_model_symbol=FileReadString(h,sym_len);
-    g_model_tf=(ENUM_TIMEFRAMES)(int)FileReadLong(h);
+  bool has_checkpoint = false;
+  
+  if(magic==(long)0xC0DE0203){
+      has_checkpoint = true;  // New format with training checkpoints
+  } else if(magic==(long)0xC0DE0202){
+      has_checkpoint = false; // Old format without checkpoints
   } else {
-    FileSeek(h,(long)pos,SEEK_SET);
-    if(!ReadSymbolAndTF(h,g_model_symbol,g_model_tf)){
+      Print("EA LoadModel: unsupported model file format"); 
+      FileClose(h); 
+      return false; 
+  }
+
+  // Read symbol & timeframe - try new format first, then fall back to old format
+  ulong pos = FileTell(h);
+  int sym_len = (int)FileReadLong(h);
+  if(sym_len > 0 && sym_len <= 32){
+    // New format with length prefix
+    g_model_symbol = FileReadString(h, sym_len);
+    int tf_int = (int)FileReadLong(h);
+    g_model_tf = (ENUM_TIMEFRAMES)tf_int;
+  } else {
+    // Old format - use existing robust parser
+    FileSeek(h, (long)pos, SEEK_SET);  // Go back
+    if(!ReadSymbolAndTF(h, g_model_symbol, g_model_tf)){
       Print("EA LoadModel: failed to parse symbol/timeframe.");
       FileClose(h); return false;
     }
   }
 
-  // Core sizes
-  int stsz=(int)FileReadLong(h);
-  int acts=(int)FileReadLong(h);
-  g_h1=(int)FileReadLong(h);
-  g_h2=(int)FileReadLong(h);
-  g_h3=(int)FileReadLong(h);
-
-  // ---- ARCH FLAGS & SIZES (consume all 8 longs written by trainer) ----
-  bool file_has_conf=false;        // UseConfidenceOutput
-  int  conf_head_size=0;           // ConfidenceHeadSize (payload dims later)
-  int  seq_len_ignored=0;
-
+  // Read model architecture parameters
+  int stsz = (int)FileReadLong(h);  // State size (number of input features)
+  int acts = (int)FileReadLong(h);  // Number of actions
+  g_h1     = (int)FileReadLong(h);  // Hidden layer 1 size
+  g_h2     = (int)FileReadLong(h);  // Hidden layer 2 size  
+  g_h3     = (int)FileReadLong(h);  // Hidden layer 3 size
+  
+  // Read architecture flags (for new format)
   if(has_checkpoint){
-    g_Q.has_lstm        = (FileReadLong(h)==1);   // UseLSTM
-    g_Q.has_dueling     = (FileReadLong(h)==1);   // UseDueling
-    file_has_conf       = (FileReadLong(h)==1);   // UseConfidenceOutput  <-- MISSING BEFORE
-
-    g_Q.lstm_size       = (int)FileReadLong(h);   // LSTMSize
-    seq_len_ignored     = (int)FileReadLong(h);   // SequenceLen (EA doesn't use)
-    g_Q.value_head_size = (int)FileReadLong(h);   // ValueHeadSize (trainer still saves it)
-    g_Q.advantage_head_size=(int)FileReadLong(h); // AdvHeadSize
-    conf_head_size      = (int)FileReadLong(h);   // ConfidenceHeadSize   <-- MISSING BEFORE
+    g_Q.has_lstm = (FileReadLong(h) == 1);
+    g_Q.has_dueling = (FileReadLong(h) == 1);
+    g_Q.lstm_size = (int)FileReadLong(h);
+    int seq_len = (int)FileReadLong(h);  // Sequence length (not used in EA)
+    g_Q.value_head_size = (int)FileReadLong(h);
+    g_Q.advantage_head_size = (int)FileReadLong(h);
   } else {
-    g_Q.has_lstm=false; g_Q.has_dueling=false; g_Q.lstm_size=0;
-    g_Q.value_head_size=0; g_Q.advantage_head_size=0;
+    // Legacy format - assume no advanced features
+    g_Q.has_lstm = false;
+    g_Q.has_dueling = false;
+    g_Q.lstm_size = 0;
+    g_Q.value_head_size = 0;
+    g_Q.advantage_head_size = 0;
   }
 
-  // Verify STATE/ACTIONS
+  // Verify model matches our expected structure
   if(stsz!=STATE_SIZE || acts!=ACTIONS){
-    PrintFormat("EA LoadModel: shape mismatch (STATE/ACTIONS). File has %d/%d; EA expects %d/%d",
-                stsz,acts,(int)STATE_SIZE,(int)ACTIONS);
+    Print("EA LoadModel: shape mismatch (STATE/ACTIONS). File has ",stsz,"/",acts);
     FileClose(h); return false;
   }
 
-  // Build network scaffold (InitFromSizes now sets Value head → 1 and L4 input correctly)
+  // Initialize neural network with the loaded architecture
   g_Q.InitFromSizes(STATE_SIZE,g_h1,g_h2,g_h3,ACTIONS);
-
-  // Feature normalization
+  
+  // Load feature normalization parameters (min/max values for each input feature)
   ArrayResize(g_feat_min,STATE_SIZE); ArrayResize(g_feat_max,STATE_SIZE);
-  for(int i=0;i<STATE_SIZE;++i){ g_feat_min[i]=FileReadDouble(h); g_feat_max[i]=FileReadDouble(h); }
-
-  // Checkpoint block (informative)
+  for(int i=0;i<STATE_SIZE;++i){ 
+      g_feat_min[i]=FileReadDouble(h);  // Minimum value for feature i
+      g_feat_max[i]=FileReadDouble(h);  // Maximum value for feature i
+  }
+  
+  // Skip checkpoint data if present (EA doesn't need it)
   if(has_checkpoint){
-    datetime last_trained=(datetime)FileReadLong(h);
-    int      training_steps=(int)FileReadLong(h);
-    double   checkpoint_eps=FileReadDouble(h);
-    double   checkpoint_beta=FileReadDouble(h);
-    Print("EA LoadModel: Model contains checkpoint data (training timestamp: ",
-          TimeToString(last_trained,TIME_DATE|TIME_MINUTES), ", steps: ", training_steps, ")");
+      datetime last_trained = (datetime)FileReadLong(h);  // Skip training timestamp
+      int training_steps = (int)FileReadLong(h);          // Skip training steps
+      double checkpoint_eps = FileReadDouble(h);          // Skip epsilon
+      double checkpoint_beta = FileReadDouble(h);         // Skip beta
+      
+      Print("EA LoadModel: Model contains checkpoint data (training timestamp: ", 
+            TimeToString(last_trained), ", steps: ", training_steps, ")");
   }
 
-  // ---- Load layers in trainer's order ----
+  // Load the trained weights and biases for each layer
   bool ok=true;
-  ok = ok && LoadLayer(h,g_Q.L1);      // STATE_SIZE → h1
-  ok = ok && LoadLayer(h,g_Q.L2);      // h1 → h2
-  ok = ok && LoadLayer(h,g_Q.L3);      // h2 → h3
-  if(!ok){ FileClose(h); return false; }
-
+  ok = ok && LoadLayer(h,g_Q.L1);  // Load layer 1
+  ok = ok && LoadLayer(h,g_Q.L2);  // Load layer 2
+  ok = ok && LoadLayer(h,g_Q.L3);  // Load layer 3
+  
+  // Load LSTM layer if enabled
   if(g_Q.has_lstm){
-    ok = ok && LoadLSTMLayer(h,g_Q.lstm); // h3 → lstm_size
-    if(!ok){ FileClose(h); return false; }
+    ok = ok && LoadLSTMLayer(h, g_Q.lstm);
   }
-
+  
+  // Load dueling heads or final layer
   if(g_Q.has_dueling){
-    ok = ok && LoadLayer(h,g_Q.value_head);     // final_in → 1   (InitFromSizes FIX)
-    ok = ok && LoadLayer(h,g_Q.advantage_head); // final_in → ACTIONS
+    ok = ok && LoadLayer(h, g_Q.value_head);
+    ok = ok && LoadLayer(h, g_Q.advantage_head);
   } else {
-    ok = ok && LoadLayer(h,g_Q.L4);             // final_in → ACTIONS
-  }
-  if(!ok){ FileClose(h); return false; }
-
-  // Optional Confidence head (skip payload cleanly if present)
-  if(file_has_conf){
-    int cin=(int)FileReadLong(h);
-    int cout=(int)FileReadLong(h);
-    if(cin<=0 || cout<=0 || cin>20000 || cout>20000){
-      PrintFormat("EA LoadModel: invalid Confidence head dims %d×%d",cin,cout);
-      FileClose(h); return false;
-    }
-    // Skip weights (cin*cout) + biases (cout), doubles (8 bytes each)
-    long cur=(long)FileTell(h);
-    long skip_bytes = 8 * ((long)cin * (long)cout + (long)cout);
-    FileSeek(h, cur + skip_bytes, SEEK_SET);
+    ok = ok && LoadLayer(h,g_Q.L4);  // Load layer 4 (output)
   }
 
   FileClose(h);
-  Print("EA LoadModel: Successfully loaded ",filename);
-  Print("  Symbol: ",g_model_symbol,", Timeframe: ",EnumToString(g_model_tf));
-  return true;
+  if(ok) {
+      Print("EA LoadModel: Successfully loaded ",filename);
+      Print("  Symbol: ",g_model_symbol,", Timeframe: ",EnumToString(g_model_tf));
+      
+      string arch_desc = IntegerToString(STATE_SIZE) + "->" + IntegerToString(g_h1) + "->" + IntegerToString(g_h2) + "->" + IntegerToString(g_h3);
+      if(g_Q.has_lstm) arch_desc += "->LSTM(" + IntegerToString(g_Q.lstm_size) + ")";
+      if(g_Q.has_dueling) arch_desc += "->Dueling(V:" + IntegerToString(g_Q.value_head_size) + ",A:" + IntegerToString(g_Q.advantage_head_size) + ")";
+      arch_desc += "->" + IntegerToString(ACTIONS);
+      
+      Print("  Architecture: ", arch_desc);
+      Print("  Features: LSTM=", (g_Q.has_lstm ? "YES" : "NO"), ", Dueling=", (g_Q.has_dueling ? "YES" : "NO"));
+      
+      if(has_checkpoint){
+          Print("  Model format: Double-Dueling DRQN with training checkpoints");
+      } else {
+          Print("  Model format: Legacy (no advanced features)");
+      }
+  }
+  return ok;
 }
-
-
-
-
-
 
 //============================== MARKET DATA & FEATURES ===================
 // These functions load market data and calculate technical indicators
@@ -1900,8 +1874,8 @@ bool ScalePosition(double current_lots, double target_lots, bool is_long){
         // Add to position
         trade.SetExpertMagicNumber(InpMagic);
         bool result = is_long ? 
-            trade.Buy(add_volume, _Symbol, 0, 0, 0, "cortex5_scale_up") :
-            trade.Sell(add_volume, _Symbol, 0, 0, 0, "cortex5_scale_up");
+            trade.Buy(add_volume, _Symbol, 0, 0, 0, "cortex3_scale_up") :
+            trade.Sell(add_volume, _Symbol, 0, 0, 0, "cortex3_scale_up");
             
         if(result){
             SmartLog("TRADE", "Position scaled UP: Added " + DoubleToString(add_volume,2) + " lots to " + (is_long?"LONG":"SHORT") + " position");
@@ -2735,7 +2709,7 @@ void MaybeTrade(const int action){
     if(TimeCurrent() - last_critical_alert > 60){ // Alert every minute for critical safety
       Print("CRITICAL SAFETY BLOCK: Trading attempt prevented due to model mismatch!");
       Print("Chart: ", _Symbol, " ", EnumToString(_Period), " | Model: ", g_model_symbol, " ", EnumToString(g_model_tf));
-      Alert("cortex5 CRITICAL: Trading blocked - model mismatch detected!");
+      Alert("CORTEX3 CRITICAL: Trading blocked - model mismatch detected!");
       last_critical_alert = TimeCurrent();
     }
     return; // Absolutely refuse to trade
@@ -2897,8 +2871,8 @@ void MaybeTrade(const int action){
   // Execute the trade with SL/TP
   trade.SetExpertMagicNumber(InpMagic);
   bool ok = is_buy ? 
-      trade.Buy(lots, _Symbol, 0, sl_price, tp_price, "cortex5_ai") :
-      trade.Sell(lots, _Symbol, 0, sl_price, tp_price, "cortex5_ai");
+      trade.Buy(lots, _Symbol, 0, sl_price, tp_price, "cortex3_ai") :
+      trade.Sell(lots, _Symbol, 0, sl_price, tp_price, "cortex3_ai");
       
   // Log the result with risk management info
   if(ok) {
@@ -2959,7 +2933,7 @@ int OnInit(){
       Print("  2. Retrain model for this symbol/timeframe: ", _Symbol, " ", EnumToString(_Period));
       Print("  3. Set InpEnforceSymbolTF=false (NOT RECOMMENDED FOR LIVE TRADING)");
       Print("================================================================================");
-      Alert("cortex5 EA ERROR: Model mismatch detected. Check Expert log!");
+      Alert("CORTEX3 EA ERROR: Model mismatch detected. Check Expert log!");
       return(INIT_FAILED);  // Stop EA to prevent dangerous trading
     } else {
       Print("WARNING: Model enforcement is DISABLED - EA will continue with MISMATCHED MODEL!");
@@ -2968,7 +2942,7 @@ int OnInit(){
       Print("================================================================================");
       
       // Send multiple alerts to ensure user notices
-      Alert("cortex5 EA WARNING: Trading with mismatched model! Performance will be poor!");
+      Alert("CORTEX3 EA WARNING: Trading with mismatched model! Performance will be poor!");
       Alert("Chart: ", _Symbol, " ", EnumToString(_Period), " | Model: ", g_model_symbol, " ", EnumToString(g_model_tf));
     }
   } else {
@@ -3047,7 +3021,7 @@ int OnInit(){
     InitializeAdaptiveParameters();
   }
   
-  Print("=== cortex5 EA INITIALIZED ===");
+  Print("=== CORTEX3 EA INITIALIZED ===");
   if(InpUseEnsembleModel){
     Print("Ensemble Models: ", g_active_ensemble_count, " loaded | Method: ", InpEnsembleMethod);
     Print("Agreement threshold: ", DoubleToString(InpEnsembleAgreementThreshold, 3));
@@ -3328,7 +3302,7 @@ void OnDeinit(const int reason){
         LogInit("TICK OPTIMIZATION: Final statistics - " + stats);
     }
     
-    Print("cortex5 EA shutting down. Reason: ", reason);
+    Print("Cortex3 EA shutting down. Reason: ", reason);
 }
 
 //============================== TRADE MANAGEMENT FUNCTIONS ======================
