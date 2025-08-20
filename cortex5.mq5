@@ -41,9 +41,9 @@ input string  InpModelFileName   = "DoubleDueling_DRQN_Model.dat";  // AI brain 
 
 // CORE RISK MANAGEMENT - ESSENTIAL FOR LIVE TRADING
 // These settings protect your account from catastrophic losses
-input double  InpRiskPercent     = 2.0;   // Risk per trade as % of total account balance
+input double  InpRiskPercent     = 5.0;   // Risk per trade as % of total account balance
                                           // ↳ CRITICAL: 2% means if you have $10,000, max loss per trade is $200
-input double  InpMaxSpread       = 3.0;   // Don't trade if broker spread exceeds this (points)
+input double  InpMaxSpread       = 15.0;   // Don't trade if broker spread exceeds this (points)
                                           // ↳ PROTECTION: High spreads kill profitability - avoid bad market conditions  
 input double  InpATRMultiplier   = 2.0;   // Stop loss distance as multiple of Average True Range
                                           // ↳ ADAPTIVE: Uses market volatility to set realistic stop losses
@@ -287,7 +287,7 @@ input double  InpMaxCorrelation  = 0.7;   // Maximum correlation between positio
 // TRADING SESSION CONTROLS (NEW - time-based filters)
 input bool    InpUseTradingHours = true;  // Enable trading hours filter
 input string  InpTradingStart    = "08:00"; // Daily trading start time (server time)
-input string  InpTradingEnd      = "17:00"; // Daily trading end time (server time)
+input string  InpTradingEnd      = "23:00"; // Daily trading end time (server time)
 input bool    InpAvoidFriday     = true;  // Avoid trading on Fridays (weekend gap risk)
 input bool    InpAvoidSunday     = true;  // Avoid trading on Sundays (gap openings)
 
